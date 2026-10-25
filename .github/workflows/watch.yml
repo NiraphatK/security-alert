@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/5 * * * *" # GitHub's minimum; scheduled runs are best-effort and can lag
   workflow_dispatch:
+    inputs:
+      preview:
+        description: "ส่งตัวอย่างข้อความแต่ละแบบไป Discord (ไม่แตะ state)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write # commit state.json only
@@ -24,6 +29,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW: ${{ inputs.preview }}
 
       - name: Save state
         if: always() # keep what was already sent even if the run crashed later
@@ -40,5 +46,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" \
-            -d "{\"content\":\"⚠️ security-alert ล้ม ดู log: $RUN\",\"allowed_mentions\":{\"parse\":[]}}" "$DISCORD_WEBHOOK"
+          curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
+            "allowed_mentions": {"parse": []},
+            "embeds": [{"title": "⚠️ ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว", "url": "'"$RUN"'", "color": 16762173,
+                        "description": "รอบนี้ไม่ได้ส่งข่าว — กดหัวข้อเพื่อดู log บน GitHub Actions"}]}'

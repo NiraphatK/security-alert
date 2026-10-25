@@ -12,8 +12,10 @@ def ghsa(id, severity="critical", published="2026-10-25T10:00:00Z", reviewed=Non
         "ghsa_id": id, "cve_id": cve, "severity": severity, "published_at": published, "github_reviewed_at": reviewed,
         "updated_at": "2026-10-25T11:00:00Z", "withdrawn_at": withdrawn, "html_url": f"https://github.com/advisories/{id}",
         "summary": "RCE in next", "cvss_severities": {"cvss_v3": {"score": 9.8}, "cvss_v4": {"score": None}},
+        "description": "## Summary\n\nCrafted *headers* reach eval.\n\n### Impact\nFull takeover.",
         "vulnerabilities": [
-            {"package": {"ecosystem": "npm", "name": "next"}, "vulnerable_version_range": "< 15.2.3", "first_patched_version": "15.2.3"},
+            {"package": {"ecosystem": "npm", "name": "next"}, "vulnerable_version_range": ">= 15.0.0, < 15.2.3", "first_patched_version": "15.2.3"},
+            {"package": {"ecosystem": "npm", "name": "next"}, "vulnerable_version_range": "< 14.2.25", "first_patched_version": "14.2.25"},
             {"package": {"ecosystem": "maven", "name": "org.x:y"}, "vulnerable_version_range": "<= 1.0", "first_patched_version": None},
         ],
     }
@@ -32,7 +34,8 @@ def nvd(id, score=9.8, metric="cvssMetricV31", desc="Overflow in foo", published
 def kev(id, added="2026-10-25", ransomware="Unknown"):
     return {
         "cveID": id, "vendorProject": "Apple", "product": "macOS", "dateAdded": added, "dueDate": "2026-11-15",
-        "shortDescription": "Kernel bug", "requiredAction": "Apply updates per vendor instructions.",
+        "vulnerabilityName": "Apple macOS Kernel Vulnerability", "shortDescription": "Kernel bug",
+        "requiredAction": "Apply updates per vendor instructions, ensuring compliance with BOD 26-04 (see URL in Notes). Follow guidance.",
         "knownRansomwareCampaignUse": ransomware,
         "notes": "https://support.apple.com/1234 ; ; BOD 26-04: https://www.cisa.gov/bod ; https://nvd.nist.gov/vuln/detail/" + id,
     }
@@ -51,9 +54,13 @@ def test_ghsa():
     assert [k[0] for k, _ in out] == ["ghsa:GHSA-new", "ghsa:GHSA-late"], out
     keys, e = out[0]
     assert keys == ["ghsa:GHSA-new", "cve:CVE-1"] and "cve:CVE-1" in taken
-    assert e["title"] == "🩹 CRITICAL 9.8 · npm/next +1 — CVE-1", e["title"]
-    fix = e["fields"][0]["value"]
-    assert "`npm i next@15.2.3`" in fix and "ยังไม่มี patch" in fix, fix
+    assert e["author"]["name"] == "🩹 CRITICAL 9.8 · GitHub Advisory" and e["title"] == "RCE in next"
+    assert e["description"] == r"Crafted \*headers\* reach eval. Full takeover.", e["description"]  # headings dropped
+    assert e["footer"]["text"] == "CVE-1 · GHSA-new"
+    nxt, maven = e["fields"]  # ranges of one package share a field
+    assert nxt["name"] == "📦 next · npm" and nxt["value"].count("โดน") == 2
+    assert nxt["value"].endswith("```sh\nnpm i next@15.2.3\nnpm i next@14.2.25\n```"), nxt["value"]
+    assert maven["name"] == "📦 org.x:y · Maven" and "ยังไม่มี patch" in maven["value"] and "```" not in maven["value"]
 
 
 def test_nvd():
@@ -70,12 +77,13 @@ def test_nvd():
         nvd("CVE-2026-9"),  # already alerted by GitHub Advisory
         nvd("CVE-2021-10"),  # old bug backfilled this week
     ], taken, NOW - watch.NVD_LOOKBACK)
-    assert [k[0] for k, _ in out] == ["nvd:CVE-2026-1", "nvd:CVE-2025-2"], out
-    assert out[0][1].startswith("`9.8` [CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)")
-    assert out[0][1].endswith(" · [patch](https://example.com/patch)") and "patch" not in out[1][1]
+    assert [k[0] for k, _ in out] == ["nvd:CVE-2026-1", "nvd:CVE-2025-2"], out  # sorted worst first
+    assert out[0][1] == "`9.8`  **[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · [🩹 patch](https://example.com/patch)\nOverflow in foo"
+    assert "patch" not in out[1][1]
     feed = watch.nvd_feed(out * 40)
     assert len(feed) > 1 and all(len(e["description"]) <= 4096 for _, e in feed)
     assert sum(len(k) for k, _ in feed) == 2 * 2 * 40  # every CVE's keys land in some message
+    assert feed[0][1]["title"] == f"{feed[0][1]['description'].count('**[')} รายการ · CVSS ≥ 9.0"
 
 
 def test_md():
@@ -86,9 +94,13 @@ def test_kev():
     taken = {"kev:CVE-seen", "cve:CVE-again"}
     out = watch.match_kev([kev("CVE-new", ransomware="Known"), kev("CVE-old", added="2026-10-01"), kev("CVE-seen"), kev("CVE-again")], taken, CUT)
     assert [k[0] for k, _ in out] == ["kev:CVE-new", "kev:CVE-again"], out  # reported CVE now exploited = alert again
-    fields = {f["name"]: f["value"] for f in out[0][1]["fields"]}
-    assert "cisa.gov" not in fields["advisory / patch"] and "https://support.apple.com/1234" in fields["advisory / patch"]
-    assert "ransomware" in fields
+    e = out[0][1]
+    assert e["title"] == "Apple macOS Kernel Vulnerability" and e["author"]["name"] == "🚨 ถูกโจมตีจริง · CISA KEV"
+    fields = {f["name"]: f["value"] for f in e["fields"]}
+    assert fields["🔗 วิธีแก้"] == "[support.apple.com](https://support.apple.com/1234) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-new)"
+    assert fields["🛠️ ต้องทำ"] == "Apply updates per vendor instructions"  # directive boilerplate trimmed
+    assert fields["⏰ แพตช์ภายใน"] == "<t:1794700800:D>\n<t:1794700800:R>"  # 2026-11-15 00:00 UTC
+    assert fields["🦠 Ransomware"] == "⚠️ ใช้แล้ว" and {f["name"]: f["value"] for f in out[1][1]["fields"]}["🦠 Ransomware"] == "ยังไม่พบ"
 
 
 def test_fix_cmd():
@@ -107,8 +119,8 @@ def test_batches():
 def test_health():
     fail = {}
     said = [watch.health(fail, "NVD", OSError("down")) for _ in range(watch.FAIL_ALERT_AFTER + 3)]
-    assert [s is not None for s in said].count(True) == 1 and said[watch.FAIL_ALERT_AFTER - 1][0].startswith("⚠️")
-    assert watch.health(fail, "NVD")[0].startswith("✅") and "NVD" not in fail
+    assert [s is not None for s in said].count(True) == 1 and said[watch.FAIL_ALERT_AFTER - 1]["title"].startswith("⚠️")
+    assert watch.health(fail, "NVD")["title"].startswith("✅") and "NVD" not in fail
     watch.health(fail, "KEV", OSError("blip"))
     assert watch.health(fail, "KEV") is None  # a short blip recovers silently
 
@@ -120,8 +132,8 @@ def test_digest_and_prune():
         "nvd:C": iso(NOW - timedelta(days=2)), "nvd:D": iso(NOW - timedelta(days=31)),
     }}
     assert watch.digest(state, NOW.replace(hour=1), ) is None  # before 09:00 Bangkok
-    text, _ = watch.digest(state, NOW)
-    assert "KEV 1" in text and "GHSA 1" in text and "NVD 0" in text, text
+    counts = [f["value"] for f in watch.digest(state, NOW)["fields"]]
+    assert counts == ["**1**", "**1**", "**0**"], counts  # kev, ghsa, nvd
     assert watch.digest(state, NOW) is None  # once a day
     watch.prune(state["seen"], NOW)
     assert "nvd:D" not in state["seen"] and "nvd:C" in state["seen"]

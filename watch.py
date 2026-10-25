@@ -5,7 +5,8 @@ Sources, most urgent first:
   GitHub Advisory  critical open-source package vulns, with patched versions
   NVD              any new CVE scored >= 9.0, usually before it reaches KEV
 
-Env: DISCORD_WEBHOOK (unset = dry run: print, keep no state), GITHUB_TOKEN, NVD_API_KEY (optional).
+Env: DISCORD_WEBHOOK (unset = dry run: print, keep no state), GITHUB_TOKEN, NVD_API_KEY (optional),
+     PREVIEW=true (post one sample of each message type, touch no state).
 """
 import http.client
 import json
@@ -14,6 +15,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -44,6 +46,8 @@ FIX_CMD = {
     "rubygems": "bundle update {n}",
     "composer": "composer require {n}:^{v}",
 }
+ECOSYSTEMS = {"npm": "npm", "pip": "PyPI", "rust": "Rust", "go": "Go", "maven": "Maven", "composer": "PHP",
+              "rubygems": "Ruby", "nuget": ".NET", "pub": "Dart", "swift": "Swift", "erlang": "Erlang", "actions": "GitHub Actions"}
 RED, ORANGE, PURPLE, GREEN, YELLOW = 0xE5484D, 0xF76B15, 0x8E4EC6, 0x30A46C, 0xFFC53D
 
 
@@ -123,6 +127,14 @@ def fix_cmd(ecosystem, name, version):
     return tpl and tpl.format(n=name, v=version.removeprefix("v"))
 
 
+def package_field(eco, name, ranges):
+    """One field per package: every affected range with its fix, then the upgrade commands to copy."""
+    lines = [f"โดน `{r or '?'}` → " + (f"แก้แล้วใน **{f}**" if f else "⏳ ยังไม่มี patch") for r, f in ranges]
+    cmds = list(dict.fromkeys(c for _, f in ranges if f and (c := fix_cmd(eco, name, f))))
+    value = "\n".join(lines) + (f"\n```sh\n{chr(10).join(cmds)}\n```" if cmds else "")
+    return {"name": cut(f"📦 {name} · {ECOSYSTEMS.get(eco, eco)}", 256), "value": cut(value, 1024)}
+
+
 def match_ghsa(advisories, taken, cutoff):
     out = []
     for a in advisories:
@@ -131,25 +143,21 @@ def match_ghsa(advisories, taken, cutoff):
         if a["severity"] not in GHSA_SEVERITIES or a.get("withdrawn_at") or fresh < cutoff or keys[0] in taken:
             continue
         taken.update(keys)
-        pkgs, fixes = [], []
+        packages = {}
         for v in a.get("vulnerabilities") or []:
-            eco, name = (v.get("package") or {}).get("ecosystem", "?"), (v.get("package") or {}).get("name", "?")
-            fixed = v.get("first_patched_version")
-            pkgs.append(f"{eco}/{name}")
-            line = f"**{md(f'{eco}/{name}')}** `{v.get('vulnerable_version_range') or '?'}` → " + (f"`{fixed}`" if fixed else "ยังไม่มี patch")
-            if fixed and (cmd := fix_cmd(eco, name, fixed)):
-                line += f"\n`{cmd}`"
-            fixes.append(line)
-        pkgs = list(dict.fromkeys(pkgs))
-        label = pkgs[0] + (f" +{len(pkgs) - 1}" if len(pkgs) > 1 else "") if pkgs else "package"
+            p = v.get("package") or {}
+            packages.setdefault((p.get("ecosystem", "?"), p.get("name", "?")), []).append(
+                (v.get("vulnerable_version_range"), v.get("first_patched_version")))
         score = max(((s or {}).get("score") or 0 for s in (a.get("cvss_severities") or {}).values()), default=0)
+        body = " ".join(l for l in (a.get("description") or "").splitlines() if not l.lstrip().startswith("#"))
         out.append((keys, {
-            "title": cut(f"🩹 CRITICAL{f' {score}' if score else ''} · {label} — {a.get('cve_id') or a['ghsa_id']}", 256),
+            "author": {"name": f"🩹 CRITICAL{f' {score}' if score else ''} · GitHub Advisory"},
+            "title": cut(a.get("summary"), 256),
             "url": a["html_url"],
-            "description": cut(md(a.get("summary")), 400),
+            "description": cut(md(body), 300),
             "color": PURPLE,
-            "fields": [{"name": "แก้ด้วย", "value": cut("\n".join(fixes), 1024) or "-"}],
-            "footer": {"text": f"GitHub Advisory · {a['ghsa_id']}"},
+            "fields": [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]],
+            "footer": {"text": " · ".join(filter(None, [a.get("cve_id"), a["ghsa_id"]]))},
             "timestamp": ts(a["published_at"]).isoformat(),
         }))
     return out
@@ -173,22 +181,27 @@ def match_nvd(cves, taken, cutoff):
             continue
         taken.update(keys)
         fix = next((r["url"] for r in c.get("references", []) if FIX_TAGS & set(r.get("tags", []))), None)
-        line = f"`{score}` [{c['id']}](https://nvd.nist.gov/vuln/detail/{c['id']}) {cut(md(desc), 180)}"
-        out.append((keys, line + (f" · [patch]({fix})" if fix else "")))
-    return out
+        head = f"`{score}`  **[{c['id']}](https://nvd.nist.gov/vuln/detail/{c['id']})**" + (f" · [🩹 patch]({fix})" if fix else "")
+        out.append((score, keys, f"{head}\n{cut(md(desc), 150)}"))
+    return [(keys, line) for _, keys, line in sorted(out, key=lambda x: -x[0])]  # worst first
 
 
 def nvd_feed(lines):
-    out, keys, text = [], [], ""
-    for k, line in lines:
-        if text and len(text) + len(line) > 3900:
-            out.append((keys, text))
-            keys, text = [], ""
-        keys, text = keys + k, text + line + "\n"
-    if text:
-        out.append((keys, text))
-    return [(k, {"title": f"🔴 CVE ใหม่ CVSS ≥ {NVD_MIN_SCORE}", "description": t, "color": ORANGE,
-                 "footer": {"text": "NVD · กด CVE ดูรายละเอียด/วิธีแก้ · [patch] = ลิงก์แก้จาก vendor"}}) for k, t in out]
+    out, keys, entries = [], [], []
+    for k, entry in lines:
+        if entries and len("\n\n".join(entries + [entry])) > 3900:
+            out.append((keys, entries))
+            keys, entries = [], []
+        keys, entries = keys + k, entries + [entry]
+    if entries:
+        out.append((keys, entries))
+    return [(k, {
+        "author": {"name": "🔴 CVE ร้ายแรงใหม่ · NVD"},
+        "title": f"{len(e)} รายการ · CVSS ≥ {NVD_MIN_SCORE}",
+        "description": "\n\n".join(e),
+        "color": ORANGE,
+        "footer": {"text": "กดเลข CVE เพื่อดูรายละเอียดและวิธีแก้"},
+    }) for k, e in out]
 
 
 def match_kev(vulns, taken, cutoff):
@@ -198,22 +211,27 @@ def match_kev(vulns, taken, cutoff):
         if keys[0] in taken or v["dateAdded"] < since:
             continue
         taken.update(keys)
+        nvd_link = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
         notes = (s.strip() for s in v.get("notes", "").split(";"))
-        links = [u for u in notes if u.startswith("http") and "cisa.gov" not in u]
-        fields = [
-            {"name": "ต้องทำ", "value": cut(md(v.get("requiredAction")), 300) or "-"},
-            {"name": "แพตช์ภายใน", "value": v.get("dueDate") or "-", "inline": True},
-        ]
-        if v.get("knownRansomwareCampaignUse") == "Known":
-            fields.append({"name": "ransomware", "value": "ใช้ในแคมเปญ ransomware แล้ว", "inline": True})
-        fields.append({"name": "advisory / patch", "value": cut("\n".join(links[:3]), 1024) or "-"})
+        vendor = [u for u in notes if u.startswith("http") and not any(h in u for h in ("cisa.gov", "nvd.nist.gov"))]
+        links = [f"[{urllib.parse.urlsplit(u).hostname.removeprefix('www.')}]({u})" for u in vendor[:2]] + [f"[NVD]({nvd_link})"]
+        # requiredAction now trails CISA directive boilerplate; the first clause is the actual instruction
+        action = re.split(r"\.\s|, ensuring", v.get("requiredAction") or "")[0]
+        due = v.get("dueDate")
         out.append((keys, {
-            "title": cut(f"🚨 ถูกโจมตีจริง · {v['vendorProject']} {v['product']} — {v['cveID']}", 256),
-            "url": f"https://nvd.nist.gov/vuln/detail/{v['cveID']}",
-            "description": cut(md(v.get("shortDescription")), 500),
+            "author": {"name": "🚨 ถูกโจมตีจริง · CISA KEV"},
+            "title": cut(v.get("vulnerabilityName") or f"{v['vendorProject']} {v['product']}", 256),
+            "url": nvd_link,
+            "description": cut(md(v.get("shortDescription")), 350),
             "color": RED,
-            "fields": fields,
-            "footer": {"text": f"CISA KEV · เพิ่มเมื่อ {v['dateAdded']}"},
+            "fields": [
+                {"name": "🆔 CVE", "value": f"`{v['cveID']}`", "inline": True},
+                {"name": "⏰ แพตช์ภายใน", "value": f"<t:{int(ts(due).timestamp())}:D>\n<t:{int(ts(due).timestamp())}:R>" if due else "-", "inline": True},
+                {"name": "🦠 Ransomware", "value": "⚠️ ใช้แล้ว" if v.get("knownRansomwareCampaignUse") == "Known" else "ยังไม่พบ", "inline": True},
+                {"name": "🛠️ ต้องทำ", "value": cut(md(action), 300) or "-"},
+                {"name": "🔗 วิธีแก้", "value": " · ".join(links)},
+            ],
+            "footer": {"text": f"{v['vendorProject']} · {v['product']}"},
         }))
     return out
 
@@ -225,9 +243,10 @@ def health(fail, name, err=None):
     if err:
         fail[name] = fail.get(name, 0) + 1
         if fail[name] == FAIL_ALERT_AFTER:
-            return f"⚠️ ดึงข่าวจาก {name} ไม่ได้ {FAIL_ALERT_AFTER} รอบติด — {cut(repr(err), 300)}", YELLOW
+            return {"title": f"⚠️ ดึงข่าวจาก {name} ไม่ได้", "color": YELLOW,
+                    "description": f"ล้มเหลว {FAIL_ALERT_AFTER} รอบติดกัน (~{FAIL_ALERT_AFTER * 5} นาที) — แหล่งอื่นยังทำงานปกติ\n```{cut(repr(err), 300)}```"}
     elif fail.pop(name, 0) >= FAIL_ALERT_AFTER:
-        return f"✅ {name} กลับมาใช้ได้แล้ว", GREEN
+        return {"title": f"✅ {name} กลับมาใช้ได้แล้ว", "color": GREEN}
 
 
 def digest(state, now):
@@ -237,7 +256,16 @@ def digest(state, now):
         return None
     state["digest"] = today
     n = Counter(k.split(":")[0] for k, t in state["seen"].items() if ts(t) >= now - timedelta(days=1))
-    return f"✅ ยังเฝ้าอยู่ · 24 ชม.ที่ผ่านมาแจ้งไป 🚨 KEV {n['kev']} · 🩹 GHSA {n['ghsa']} · 🔴 NVD {n['nvd']}", GREEN
+    return {
+        "title": "☀️ สรุป 24 ชม. — ยังเฝ้าอยู่",
+        "color": GREEN,
+        "fields": [
+            {"name": "🚨 ถูกโจมตีจริง", "value": f"**{n['kev']}**", "inline": True},
+            {"name": "🩹 Open-source", "value": f"**{n['ghsa']}**", "inline": True},
+            {"name": "🔴 CVE ใหม่", "value": f"**{n['nvd']}**", "inline": True},
+        ],
+        "footer": {"text": "ถ้าวันไหนไม่มีข้อความนี้ แปลว่าตัวเฝ้าหยุดทำงาน"},
+    }
 
 
 def prune(seen, now):
@@ -249,7 +277,7 @@ def prune(seen, now):
 
 def size(e):
     return (len(e.get("title", "")) + len(e.get("description", "")) + len(e.get("footer", {}).get("text", ""))
-            + sum(len(f["name"]) + len(f["value"]) for f in e.get("fields", [])))
+            + len(e.get("author", {}).get("name", "")) + sum(len(f["name"]) + len(f["value"]) for f in e.get("fields", [])))
 
 
 def batches(alerts):
@@ -324,7 +352,11 @@ def main():
         backdated = (now - LOOKBACK).isoformat(timespec="seconds")  # keeps them out of the first digest
         for keys, _ in news + kev:
             state["seen"].update(dict.fromkeys(keys, backdated))
-        notices.append((f"🟢 เริ่มเฝ้าระวังแล้ว — ข้ามข่าวเก่า {len(news) + len(kev)} รายการ จากนี้แจ้งทันทีที่มีของใหม่", GREEN))
+        notices.append({
+            "title": "🟢 เริ่มเฝ้าระวังแล้ว", "color": GREEN,
+            "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ — จากนี้แจ้งทันทีที่มีของใหม่\n\n"
+                           "🚨 **ถูกโจมตีจริง** แจ้งพร้อม @here\n🩹 **Open-source critical** พร้อมคำสั่งอัปเกรด\n🔴 **CVE ร้ายแรงใหม่** ทุก vendor",
+        })
         news, kev = [], []
 
     prune(state["seen"], now)
@@ -333,12 +365,23 @@ def main():
         send(news, state, now)
         if notice := digest(state, now):
             notices.append(notice)
-        for text, color in notices:
-            post({"embeds": [{"description": text, "color": color}], "allowed_mentions": {"parse": []}})
+        if notices:
+            post({"embeds": notices, "allowed_mentions": {"parse": []}})
     finally:
         save(state)
     print(f"sent: kev={len(kev)} news={len(news)} notices={len(notices)} failed_sources={errors}")
 
 
+def preview(now):
+    """PREVIEW=true: post one real sample of each message type from the past week; state is untouched."""
+    week = now - timedelta(days=7)
+    samples = (match_kev(get_kev(), set(), week)[:1] + match_ghsa(get_ghsa(week), set(), week)[:1]
+               + nvd_feed(match_nvd(get_nvd(now), set(), now - NVD_LOOKBACK)[:4]))
+    samples.append(([], digest({"seen": {}}, now.replace(hour=12))))
+    for i, batch in enumerate(batches(samples)):
+        post({"content": "🧪 ตัวอย่างหน้าตาข้อความ (ข้อมูลจริงจากสัปดาห์นี้)" if i == 0 else "",
+              "embeds": [e for _, e in batch], "allowed_mentions": {"parse": []}})
+
+
 if __name__ == "__main__":
-    main()
+    preview(datetime.now(UTC)) if os.environ.get("PREVIEW") == "true" else main()
