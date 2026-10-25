@@ -1,0 +1,44 @@
+name: watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # GitHub's minimum; scheduled runs are best-effort and can lag
+  workflow_dispatch:
+
+permissions:
+  contents: write # commit state.json only
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: python3 watch.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Save state
+        if: always() # keep what was already sent even if the run crashed later
+        run: |
+          [ -f state.json ] || exit 0
+          git add state.json
+          git diff --cached --quiet && exit 0
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "state: $(date -u +%FT%TZ)"
+          git pull -q --rebase && git push -q
+
+      - name: Tell Discord the watcher broke
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" \
+            -d "{\"content\":\"⚠️ security-alert ล้ม ดู log: $RUN\",\"allowed_mentions\":{\"parse\":[]}}" "$DISCORD_WEBHOOK"
