@@ -48,5 +48,5 @@ jobs:
         run: |
           curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
             "allowed_mentions": {"parse": []},
-            "embeds": [{"title": "⚠️ ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว", "url": "'"$RUN"'", "color": 16762173,
+            "embeds": [{"title": "ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว", "url": "'"$RUN"'", "color": 16762173,
                         "description": "รอบนี้ไม่ได้ส่งข่าว — กดหัวข้อเพื่อดู log บน GitHub Actions"}]}'

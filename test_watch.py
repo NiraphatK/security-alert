@@ -54,13 +54,13 @@ def test_ghsa():
     assert [k[0] for k, _ in out] == ["ghsa:GHSA-new", "ghsa:GHSA-late"], out
     keys, e = out[0]
     assert keys == ["ghsa:GHSA-new", "cve:CVE-1"] and "cve:CVE-1" in taken
-    assert e["author"]["name"] == "🩹 CRITICAL 9.8 · GitHub Advisory" and e["title"] == "RCE in next"
+    assert e["author"]["name"] == "CRITICAL 9.8 · GitHub Advisory" and e["title"] == "RCE in next"
     assert e["description"] == r"Crafted \*headers\* reach eval. Full takeover.", e["description"]  # headings dropped
     assert e["footer"]["text"] == "CVE-1 · GHSA-new"
     nxt, maven = e["fields"]  # ranges of one package share a field
-    assert nxt["name"] == "📦 next · npm" and nxt["value"].count("โดน") == 2
+    assert nxt["name"] == "next · npm" and nxt["value"].count("โดน") == 2
     assert nxt["value"].endswith("```sh\nnpm i next@15.2.3\nnpm i next@14.2.25\n```"), nxt["value"]
-    assert maven["name"] == "📦 org.x:y · Maven" and "ยังไม่มี patch" in maven["value"] and "```" not in maven["value"]
+    assert maven["name"] == "org.x:y · Maven" and "ยังไม่มี patch" in maven["value"] and "```" not in maven["value"]
 
 
 def test_nvd():
@@ -78,7 +78,7 @@ def test_nvd():
         nvd("CVE-2021-10"),  # old bug backfilled this week
     ], taken, NOW - watch.NVD_LOOKBACK)
     assert [k[0] for k, _ in out] == ["nvd:CVE-2026-1", "nvd:CVE-2025-2"], out  # sorted worst first
-    assert out[0][1] == "`9.8`  **[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · [🩹 patch](https://example.com/patch)\nOverflow in foo"
+    assert out[0][1] == "`9.8`  **[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · [patch](https://example.com/patch)\nOverflow in foo"
     assert "patch" not in out[1][1]
     feed = watch.nvd_feed(out * 40)
     assert len(feed) > 1 and all(len(e["description"]) <= 4096 for _, e in feed)
@@ -97,10 +97,10 @@ def test_kev():
     e = out[0][1]
     assert e["title"] == "Apple macOS Kernel Vulnerability" and e["author"]["name"] == "🚨 ถูกโจมตีจริง · CISA KEV"
     fields = {f["name"]: f["value"] for f in e["fields"]}
-    assert fields["🔗 วิธีแก้"] == "[support.apple.com](https://support.apple.com/1234) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-new)"
-    assert fields["🛠️ ต้องทำ"] == "Apply updates per vendor instructions"  # directive boilerplate trimmed
-    assert fields["⏰ แพตช์ภายใน"] == "<t:1794700800:D>\n<t:1794700800:R>"  # 2026-11-15 00:00 UTC
-    assert fields["🦠 Ransomware"] == "⚠️ ใช้แล้ว" and {f["name"]: f["value"] for f in out[1][1]["fields"]}["🦠 Ransomware"] == "ยังไม่พบ"
+    assert fields["วิธีแก้"] == "[support.apple.com](https://support.apple.com/1234) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-new)"
+    assert fields["ต้องทำ"] == "Apply updates per vendor instructions"  # directive boilerplate trimmed
+    assert fields["แพตช์ภายใน"] == "<t:1794700800:D>\n<t:1794700800:R>"  # 2026-11-15 00:00 UTC
+    assert fields["Ransomware"] == "**ใช้แล้ว**" and {f["name"]: f["value"] for f in out[1][1]["fields"]}["Ransomware"] == "ยังไม่พบ"
 
 
 def test_fix_cmd():
@@ -119,8 +119,8 @@ def test_batches():
 def test_health():
     fail = {}
     said = [watch.health(fail, "NVD", OSError("down")) for _ in range(watch.FAIL_ALERT_AFTER + 3)]
-    assert [s is not None for s in said].count(True) == 1 and said[watch.FAIL_ALERT_AFTER - 1]["title"].startswith("⚠️")
-    assert watch.health(fail, "NVD")["title"].startswith("✅") and "NVD" not in fail
+    assert [s is not None for s in said].count(True) == 1 and said[watch.FAIL_ALERT_AFTER - 1]["title"] == "ดึงข่าวจาก NVD ไม่ได้"
+    assert watch.health(fail, "NVD")["title"] == "NVD กลับมาใช้ได้แล้ว" and "NVD" not in fail
     watch.health(fail, "KEV", OSError("blip"))
     assert watch.health(fail, "KEV") is None  # a short blip recovers silently
 
