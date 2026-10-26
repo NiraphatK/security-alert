@@ -30,6 +30,7 @@ NVD_LOOKBACK = timedelta(hours=72)  # many CVEs get their score a day or two aft
 KEEP_SEEN = timedelta(days=30)
 FAIL_ALERT_AFTER = 6  # consecutive failed runs (~30 min at */5) before saying a source is down
 DIGEST_HOUR_UTC = 2  # 09:00 Asia/Bangkok
+MIN_RUNS_PER_DAY = 144  # the Worker in trigger/ dispatches 288 a day; under half means it is broken
 
 HOOK = os.environ.get("DISCORD_WEBHOOK")
 STATE = Path(__file__).with_name("state.json")
@@ -133,13 +134,26 @@ def next_link(link):
 
 # --- sources -------------------------------------------------------------------------------------
 
-def get_ghsa(cutoff):
+def gh_headers():
     h = {"Accept": "application/vnd.github+json"}
     if token := os.environ.get("GITHUB_TOKEN"):
         h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+def count_runs(since):
+    """How many times the watcher ran since `since` (None outside Actions)."""
+    if not (repo := os.environ.get("GITHUB_REPOSITORY")):
+        return None
+    created = urllib.parse.quote(f">={since:%Y-%m-%dT%H:%M:%SZ}")
+    d, _ = fetch(f"https://api.github.com/repos/{repo}/actions/workflows/watch.yml/runs?created={created}&per_page=1", gh_headers())
+    return d["total_count"]
+
+
+def get_ghsa(cutoff):
     items, url = [], GHSA_URL
     for _ in range(20):  # sorted newest-updated first; stop once a page reaches past the cutoff
-        page, headers = fetch(url, h)
+        page, headers = fetch(url, gh_headers())
         items += page
         url = next_link(headers.get("Link"))
         if not page or not url or ts(page[-1]["updated_at"]) < cutoff:
@@ -412,23 +426,35 @@ def health(fail, name, err=None):
         return {"title": f"{name} กลับมาใช้ได้แล้ว", "color": GREEN}
 
 
-def digest(state, now):
-    """Once a day: what went out in the last 24 h. Doubles as a heartbeat — silence means the watcher is dead."""
+def digest(state, now, runs=lambda since: None):
+    """Once a day: what went out in the last 24 h. Doubles as a heartbeat — silence means the watcher is dead,
+    and a low run count means the 5-minute trigger is (GitHub's own cron alone fires every few hours)."""
     today = now.date().isoformat()
     if now.hour < DIGEST_HOUR_UTC or state.get("digest") == today:
         return None
     state["digest"] = today
-    n = Counter(k.split(":")[0] for k, t in state["seen"].items() if ts(t) >= now - timedelta(days=1))
-    return {
+    since = now - timedelta(days=1)
+    n = Counter(k.split(":")[0] for k, t in state["seen"].items() if ts(t) >= since)
+    try:
+        count = runs(since)
+    except Exception as e:  # the summary still goes out without the count
+        print(f"run count: {e!r}", file=sys.stderr)
+        count = None
+    embed = {
         "title": "สรุป 24 ชม. — ยังเฝ้าอยู่",
         "color": GREEN,
         "fields": [
             {"name": "ถูกโจมตีจริง", "value": f"**{n['kev']}**", "inline": True},
             {"name": "Open-source", "value": f"**{n['ghsa']}**", "inline": True},
             {"name": "CVE ใหม่", "value": f"**{n['nvd']}**", "inline": True},
-        ],
+        ] + ([{"name": "รอบตรวจ", "value": f"**{count}** รอบ", "inline": True}] if count is not None else []),
         "footer": {"text": "ถ้าวันไหนไม่มีข้อความนี้ แปลว่าตัวเฝ้าหยุดทำงาน"},
     }
+    if count is not None and count < MIN_RUNS_PER_DAY:
+        embed["color"] = YELLOW
+        embed["description"] = (f"**รอบตรวจน้อยผิดปกติ ({count} รอบ จากปกติ ~288)** — ตัวสั่งรันทุก 5 นาทีใน Cloudflare "
+                                "อาจหยุดทำงานหรือ GitHub token หมดอายุ ข่าวจะยังมาแต่ช้าลงหลายชั่วโมง")
+    return embed
 
 
 def prune(seen, now):
@@ -526,7 +552,7 @@ def main():
     try:
         send(kev, state, now, ping=True)
         send(news, state, now)
-        if notice := digest(state, now):
+        if notice := digest(state, now, count_runs):
             notices.append(notice)
         if notices:
             post({"embeds": notices, "allowed_mentions": {"parse": []}})

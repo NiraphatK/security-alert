@@ -203,6 +203,19 @@ def test_digest_and_prune():
     assert "nvd:D" not in state["seen"] and "nvd:C" in state["seen"]
 
 
+def test_digest_run_count():
+    fresh = lambda: {"digest": "2026-10-24", "seen": {}}
+    ok = watch.digest(fresh(), NOW, lambda since: 286)
+    assert ok["color"] == watch.GREEN and "description" not in ok and ok["fields"][-1]["value"] == "**286** รอบ"
+    slow = watch.digest(fresh(), NOW, lambda since: 7)  # Worker dead: only GitHub's own sparse cron ran
+    assert slow["color"] == watch.YELLOW and "7 รอบ" in slow["description"]
+
+    def broken(since):
+        raise OSError("api down")
+    quiet = watch.digest(fresh(), NOW, broken)  # no count, but the heartbeat still goes out
+    assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == ["ถูกโจมตีจริง", "Open-source", "CVE ใหม่"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

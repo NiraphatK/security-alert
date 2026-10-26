@@ -2,7 +2,7 @@ name: watch
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # GitHub's minimum; scheduled runs are best-effort and can lag
+    - cron: "*/5 * * * *" # fallback only: GitHub fires this every few hours; trigger/ dispatches every 5 min
   workflow_dispatch:
     inputs:
       preview:
@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write # commit state.json only
+  actions: read # count this workflow's runs for the daily summary
 
 concurrency:
   group: watch
