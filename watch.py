@@ -225,16 +225,17 @@ def classify(cwes, text):
 
 
 def attack_type(cwes, text, names=None):
+    """Field value: the attack's name in bold, what the attacker gets on the line below."""
     if hit := classify(cwes, text):
-        return f"{hit[0]} — {hit[1]}"
+        return f"**{hit[0]}**\n{hit[1]}"
     if cwes:  # no plain-language name for it; the CWE page explains it
         return f"[{cwes[0]}{' ' + names[cwes[0]] if (names or {}).get(cwes[0]) else ''}]({cwe_url(cwes[0])})"
 
 
 def attack_path(vector):
-    """CVSS vector -> how the attack gets in, e.g. 'ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร'."""
+    """CVSS vector -> how the attack gets in, e.g. ['ผ่านอินเทอร์เน็ต', 'ไม่ต้องล็อกอิน', 'เหยื่อไม่ต้องทำอะไร']."""
     m = dict(p.split(":", 1) for p in (vector or "").split("/") if ":" in p)
-    return " · ".join(t[m[k]] for k, t in (("AV", ATTACK_VECTOR), ("PR", PRIVILEGES), ("UI", INTERACTION)) if m.get(k) in t)
+    return [t[m[k]] for k, t in (("AV", ATTACK_VECTOR), ("PR", PRIVILEGES), ("UI", INTERACTION)) if m.get(k) in t]
 
 
 def fixed_in(text):
@@ -243,25 +244,31 @@ def fixed_in(text):
 
 
 def kev_fix(action):
+    """CISA's required action as steps."""
     a = (action or "").lower()
     if "vendor instructions" in a:
-        return "ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor (ลิงก์ด้านล่าง)" + (
-            " — ถ้ายังไม่มีวิธีแก้ ให้หยุดใช้หรือปิดไม่ให้เข้าถึงจากอินเทอร์เน็ตชั่วคราว" if "discontinue" in a else "")
+        return ["ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor (ลิงก์ด้านล่าง)"] + (
+            ["ถ้ายังไม่มีวิธีแก้ ให้หยุดใช้หรือปิดไม่ให้เข้าถึงจากอินเทอร์เน็ตชั่วคราว"] if "discontinue" in a else [])
     # requiredAction can trail CISA directive boilerplate; the first clause is the actual instruction
-    return cut(md(re.split(r"\.\s|, ensuring", action or "")[0]), 300)
+    return [cut(md(re.split(r"\.\s|, ensuring", action or "")[0]), 300)]
 
 
-def summary(kind, path, fix, excerpt, warning=None):
-    rows = [("ประเภท", kind), ("ช่องทางโจมตี", path), ("ต้องแก้", fix), ("Ransomware", warning)]
-    text = "\n".join(f"**{label}** {value}" for label, value in rows if value)
-    return text + (f"\n\n> {cut(md(excerpt), 220)}" if excerpt else "")
+def numbered(items):
+    items = [i for i in items if i]
+    return "\n".join(f"{n}. {s}" for n, s in enumerate(items, 1)) if len(items) > 1 else (items[0] if items else "-")
+
+
+def attack_fields(kind, path):
+    """Attack type and attack path, side by side."""
+    return ([{"name": "ประเภทการโจมตี", "value": kind, "inline": True}] if kind else []) + (
+        [{"name": "ช่องทางโจมตี", "value": "\n".join(path), "inline": True}] if path else [])
 
 
 def links(*pairs):
     return {"name": "ลิงก์", "value": " · ".join(f"[{label}]({url})" for label, url in pairs if url)}
 
 
-# --- matchers: pure, return [(keys, embed)] (NVD: lines); keys[0] is the alert's own id, the rest dedupe
+# --- matchers: pure, return [(keys, embed)] (NVD: entries); keys[0] is the alert's own id, the rest dedupe
 # `taken` holds every key already alerted; matchers add to it so later sources skip the same CVE.
 
 def fix_cmd(ecosystem, name, version):
@@ -270,11 +277,14 @@ def fix_cmd(ecosystem, name, version):
 
 
 def package_field(eco, name, ranges):
-    """One field per package: every affected range with its fix, then the upgrade commands to copy."""
-    lines = [f"โดน `{r or '?'}` → " + (f"แก้แล้วใน **{f}**" if f else "ยังไม่มี patch") for r, f in ranges]
+    """One fix field per package: each affected range and its fixed version, then the upgrade commands to copy."""
+    lines = [f"`{r or '?'}` → " + (f"อัปเป็น **{f}**" if f else "ยังไม่มี patch") for r, f in ranges]
     cmds = list(dict.fromkeys(c for _, f in ranges if f and (c := fix_cmd(eco, name, f))))
-    value = "\n".join(lines) + (f"\n```sh\n{chr(10).join(cmds)}\n```" if cmds else "")
-    return {"name": cut(f"{name} · {ECOSYSTEMS.get(eco, eco)}", 256), "value": cut(value, 1024)}
+    if cmds:
+        lines.append(f"```sh\n{chr(10).join(cmds)}\n```")
+    elif not any(f for _, f in ranges):
+        lines.append("ระหว่างนี้ให้หยุดใช้หรือจำกัดการใช้งาน แล้วติดตาม advisory")
+    return {"name": cut(f"วิธีแก้: {name} ({ECOSYSTEMS.get(eco, eco)})", 256), "value": cut("\n".join(lines), 1024)}
 
 
 def match_ghsa(advisories, taken, cutoff):
@@ -293,20 +303,16 @@ def match_ghsa(advisories, taken, cutoff):
         best = max((s for s in (a.get("cvss_severities") or {}).values() if s and s.get("score")), key=lambda s: s["score"], default={})
         cwes = [c["cwe_id"] for c in a.get("cwes") or []]
         body = " ".join(l for l in (a.get("description") or "").splitlines() if not l.lstrip().startswith("#"))
-        patched = any(f for ranges in packages.values() for _, f in ranges)
         score = best.get("score")
+        kind = attack_type(cwes, f"{a.get('summary')} {body}", {c["cwe_id"]: c.get("name") for c in a.get("cwes") or []})
         out.append((keys, {
             "author": {"name": f"CRITICAL{f' {score}' if score else ''} · GitHub Advisory"},
             "title": cut(a.get("summary"), 256),
             "url": a["html_url"],
-            "description": summary(
-                attack_type(cwes, f"{a.get('summary')} {body}", {c["cwe_id"]: c.get("name") for c in a.get("cwes") or []}),
-                attack_path(best.get("vector_string")),
-                "อัปเกรดเป็นเวอร์ชันที่แก้แล้ว (คำสั่งด้านล่าง)" if patched
-                else "ยังไม่มี patch — ติดตาม advisory และหยุดใช้หรือจำกัดการใช้งานชั่วคราว",
-                body),
+            "description": cut(md(body), 220),
             "color": PURPLE,
-            "fields": [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]]
+            "fields": attack_fields(kind, attack_path(best.get("vector_string")))
+                      + [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]]
                       + [links(("GitHub Advisory", a["html_url"]), ("NVD", a.get("cve_id") and nvd_url(a["cve_id"])),
                                (cwe := main_cwe(cwes), cwe and cwe_url(cwe)))],
             "footer": {"text": " · ".join(filter(None, [a.get("cve_id"), a["ghsa_id"]]))},
@@ -333,11 +339,11 @@ def nvd_fix(desc, patch):
     if versions:
         text = f"อัปเดตเป็น {' / '.join(versions)} ขึ้นไป" + (" (ตามสายเวอร์ชันที่ใช้)" if len(versions) > 1 else "")
         return text + (f" · [patch]({patch})" if patch else "")
-    return f"[ติดตั้ง patch ของ vendor]({patch})" if patch else "ยังไม่ระบุ — ดูที่ NVD"
+    return f"[ติดตั้ง patch ของ vendor]({patch})" if patch else "ยังไม่ระบุ ดูรายละเอียดที่ NVD"
 
 
 def match_nvd(cves, taken, cutoff):
-    """NVD runs ~25-50 criticals a weekday, so each is a 3-line entry (packed by `nvd_feed`), not a card."""
+    """NVD runs ~25-50 criticals a weekday, so each is a few-line entry (packed by `nvd_feed`), not a card."""
     out = []
     for c in cves:
         keys = [f"nvd:{c['id']}", f"cve:{c['id']}"]
@@ -352,9 +358,12 @@ def match_nvd(cves, taken, cutoff):
         kind = classify(cwes, desc)
         label = kind[0] if kind else (f"[{cwes[0]}]({cwe_url(cwes[0])})" if cwes else "")
         patch = next((r["url"] for r in c.get("references", []) if FIX_TAGS & set(r.get("tags", []))), None)
-        head = f"`{score}`  **[{c['id']}]({nvd_url(c['id'])})**" + (f" · {label}" if label else "")
-        how = " — ".join(filter(None, [attack_path(vector), f"แก้: {nvd_fix(desc, patch)}"]))
-        out.append((score, keys, f"{head}\n{cut(md(desc), 140)}\n{how}"))
+        lines = [f"**[{c['id']}]({nvd_url(c['id'])})** · CVSS **{score}**" + (f" · {label}" if label else ""),
+                 cut(md(desc), 140)]
+        if path := attack_path(vector):
+            lines.append(f"**ช่องทาง** {' · '.join(path)}")
+        lines.append(f"**วิธีแก้** {nvd_fix(desc, patch)}")
+        out.append((score, keys, "\n".join(lines)))
     return [(keys, entry) for _, keys, entry in sorted(out, key=lambda x: -x[0])]  # worst first
 
 
@@ -390,21 +399,20 @@ def match_kev(vulns, taken, cutoff, lookup=lambda cve: None):
         notes = (s.strip() for s in v.get("notes", "").split(";"))
         vendor = [u for u in notes if u.startswith("http") and not any(h in u for h in ("cisa.gov", "nvd.nist.gov"))]
         due = v.get("dueDate")
+        kind = attack_type(cwes, f"{v.get('vulnerabilityName')} {v.get('shortDescription')}")
         out.append((keys, {
             "author": {"name": "🚨 ถูกโจมตีจริง · CISA KEV"},
             "title": cut(v.get("vulnerabilityName") or f"{v['vendorProject']} {v['product']}", 256),
             "url": nvd_url(v["cveID"]),
-            "description": summary(
-                attack_type(cwes, f"{v.get('vulnerabilityName')} {v.get('shortDescription')}"),
-                attack_path(vector),
-                kev_fix(v.get("requiredAction")),
-                v.get("shortDescription"),
-                "**ถูกใช้ในแคมเปญ ransomware แล้ว**" if v.get("knownRansomwareCampaignUse") == "Known" else None),
+            "description": cut(md(v.get("shortDescription")), 220),
             "color": RED,
-            "fields": [
+            "fields": attack_fields(kind, attack_path(vector)) + [
+                {"name": "วิธีแก้", "value": numbered(kev_fix(v.get("requiredAction")))},
                 {"name": "CVE", "value": f"`{v['cveID']}`", "inline": True},
                 {"name": "CVSS", "value": f"**{score}**" if score else "-", "inline": True},
                 {"name": "ต้องแพตช์ภายใน", "value": f"<t:{int(ts(due).timestamp())}:D>\n<t:{int(ts(due).timestamp())}:R>" if due else "-", "inline": True},
+            ] + ([{"name": "Ransomware", "value": "**ถูกใช้ในแคมเปญ ransomware แล้ว**"}]
+                 if v.get("knownRansomwareCampaignUse") == "Known" else []) + [
                 links(*[((urllib.parse.urlsplit(u).hostname or "advisory").removeprefix("www."), u) for u in vendor[:2]],
                       ("NVD", nvd_url(v["cveID"])), (cwe := main_cwe(cwes), cwe and cwe_url(cwe))),
             ],
@@ -421,7 +429,8 @@ def health(fail, name, err=None):
         fail[name] = fail.get(name, 0) + 1
         if fail[name] == FAIL_ALERT_AFTER:
             return {"title": f"ดึงข่าวจาก {name} ไม่ได้", "color": YELLOW,
-                    "description": f"ล้มเหลว {FAIL_ALERT_AFTER} รอบติดกัน (~{FAIL_ALERT_AFTER * 5} นาที) — แหล่งอื่นยังทำงานปกติ\n```{cut(repr(err), 300)}```"}
+                    "description": f"ล้มเหลว {FAIL_ALERT_AFTER} รอบติดกัน (ประมาณ {FAIL_ALERT_AFTER * 5} นาที)\n"
+                                   f"แหล่งอื่นยังทำงานปกติ\n```{cut(repr(err), 300)}```"}
     elif fail.pop(name, 0) >= FAIL_ALERT_AFTER:
         return {"title": f"{name} กลับมาใช้ได้แล้ว", "color": GREEN}
 
@@ -441,7 +450,8 @@ def digest(state, now, runs=lambda since: None):
         print(f"run count: {e!r}", file=sys.stderr)
         count = None
     embed = {
-        "title": "สรุป 24 ชม. — ยังเฝ้าอยู่",
+        "title": "สรุป 24 ชั่วโมงที่ผ่านมา",
+        "description": "ตัวเฝ้ายังทำงานปกติ",
         "color": GREEN,
         "fields": [
             {"name": "ถูกโจมตีจริง", "value": f"**{n['kev']}**", "inline": True},
@@ -452,8 +462,9 @@ def digest(state, now, runs=lambda since: None):
     }
     if count is not None and count < MIN_RUNS_PER_DAY:
         embed["color"] = YELLOW
-        embed["description"] = (f"**รอบตรวจน้อยผิดปกติ ({count} รอบ จากปกติ ~288)** — ตัวสั่งรันทุก 5 นาทีใน Cloudflare "
-                                "อาจหยุดทำงานหรือ GitHub token หมดอายุ ข่าวจะยังมาแต่ช้าลงหลายชั่วโมง")
+        embed["description"] = (f"**รอบตรวจน้อยผิดปกติ: {count} รอบ (ปกติประมาณ 288)**\n"
+                                "ตัวสั่งรันทุก 5 นาทีใน Cloudflare อาจหยุดทำงาน หรือ GitHub token หมดอายุ\n"
+                                "ข่าวยังมาตามปกติ แต่จะช้าลงหลายชั่วโมง")
     return embed
 
 
@@ -543,7 +554,7 @@ def main():
             state["seen"].update(dict.fromkeys(keys, backdated))
         notices.append({
             "title": "เริ่มเฝ้าระวังแล้ว", "color": GREEN,
-            "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ — จากนี้แจ้งทันทีที่มีของใหม่\n\n"
+            "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ\nจากนี้แจ้งทันทีที่มีของใหม่\n\n"
                            "- **ถูกโจมตีจริง** แจ้งพร้อม @here\n- **Open-source critical** พร้อมคำสั่งอัปเกรด\n- **CVE ร้ายแรงใหม่** ทุก vendor",
         })
         news, kev = [], []

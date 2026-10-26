@@ -58,10 +58,10 @@ def test_classify():
 
 
 def test_attack_path():
-    assert watch.attack_path(NET_NOAUTH) == "ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร"
+    assert watch.attack_path(NET_NOAUTH) == ["ผ่านอินเทอร์เน็ต", "ไม่ต้องล็อกอิน", "เหยื่อไม่ต้องทำอะไร"]
     v4 = "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
-    assert watch.attack_path(v4) == "ต้องเข้าเครื่องได้ก่อน · ต้องมีสิทธิ์ admin · ต้องหลอกให้เหยื่อกดหรือเปิดไฟล์"
-    assert watch.attack_path("") == "" and watch.attack_path(None) == ""
+    assert watch.attack_path(v4) == ["ต้องเข้าเครื่องได้ก่อน", "ต้องมีสิทธิ์ admin", "ต้องหลอกให้เหยื่อกดหรือเปิดไฟล์"]
+    assert watch.attack_path("") == [] and watch.attack_path(None) == []
 
 
 def test_fixed_in():
@@ -73,10 +73,11 @@ def test_fixed_in():
 
 
 def test_kev_fix():
-    assert watch.kev_fix(kev("x")["requiredAction"]).startswith("ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor")
-    assert "หยุดใช้" in watch.kev_fix(kev("x")["requiredAction"])
-    assert "หยุดใช้" not in watch.kev_fix("Apply updates per vendor instructions.")
-    assert watch.kev_fix("Remove the device from the network, ensuring compliance with BOD.") == "Remove the device from the network"
+    steps = watch.kev_fix(kev("x")["requiredAction"])
+    assert len(steps) == 2 and steps[0].startswith("ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor") and "หยุดใช้" in steps[1]
+    assert watch.kev_fix("Apply updates per vendor instructions.") == ["ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor (ลิงก์ด้านล่าง)"]
+    assert watch.kev_fix("Remove the device from the network, ensuring compliance with BOD.") == ["Remove the device from the network"]
+    assert watch.numbered(["a", "b"]) == "1. a\n2. b" and watch.numbered(["only"]) == "only" and watch.numbered([]) == "-"
 
 
 def test_ghsa():
@@ -93,16 +94,15 @@ def test_ghsa():
     keys, e = out[0]
     assert keys == ["ghsa:GHSA-new", "cve:CVE-1"] and "cve:CVE-1" in taken
     assert e["author"]["name"] == "CRITICAL 9.8 · GitHub Advisory" and e["title"] == "RCE in next"
-    assert e["description"] == (
-        "**ประเภท** Remote Code Execution — รันโค้ดบนเครื่องเป้าหมายได้ = ยึดเครื่องได้\n"
-        "**ช่องทางโจมตี** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร\n"
-        "**ต้องแก้** อัปเกรดเป็นเวอร์ชันที่แก้แล้ว (คำสั่งด้านล่าง)\n\n"
-        r"> Crafted \*headers\* reach eval. Full takeover."), e["description"]  # headings dropped
+    assert e["description"] == r"Crafted \*headers\* reach eval. Full takeover.", e["description"]  # headings dropped
     assert e["footer"]["text"] == "CVE-1 · GHSA-new"
-    nxt, maven, link = e["fields"]  # ranges of one package share a field
-    assert nxt["name"] == "next · npm" and nxt["value"].count("โดน") == 2
+    kind, path, nxt, maven, link = e["fields"]  # ranges of one package share a field
+    assert kind == {"name": "ประเภทการโจมตี", "value": "**Remote Code Execution**\nรันโค้ดบนเครื่องเป้าหมายได้ = ยึดเครื่องได้", "inline": True}
+    assert path == {"name": "ช่องทางโจมตี", "value": "ผ่านอินเทอร์เน็ต\nไม่ต้องล็อกอิน\nเหยื่อไม่ต้องทำอะไร", "inline": True}
+    assert nxt["name"] == "วิธีแก้: next (npm)" and nxt["value"].startswith("`>= 15.0.0, < 15.2.3` → อัปเป็น **15.2.3**\n")
     assert nxt["value"].endswith("```sh\nnpm i next@15.2.3\nnpm i next@14.2.25\n```"), nxt["value"]
-    assert maven["name"] == "org.x:y · Maven" and "ยังไม่มี patch" in maven["value"] and "```" not in maven["value"]
+    assert maven["name"] == "วิธีแก้: org.x:y (Maven)" and maven["value"] == (
+        "`<= 1.0` → ยังไม่มี patch\nระหว่างนี้ให้หยุดใช้หรือจำกัดการใช้งาน แล้วติดตาม advisory")
     assert link["value"] == ("[GitHub Advisory](https://github.com/advisories/GHSA-new) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-1)"
                              " · [CWE-94](https://cwe.mitre.org/data/definitions/94.html)"), link["value"]
     assert "[NVD]" not in out[1][1]["fields"][-1]["value"]  # no CVE id, no NVD link
@@ -124,11 +124,12 @@ def test_nvd():
     ], taken, NOW - watch.NVD_LOOKBACK)
     assert [k[0] for k, _ in out] == ["nvd:CVE-2026-1", "nvd:CVE-2025-2"], out  # sorted worst first
     assert out[0][1] == (
-        "`9.8`  **[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · SQL Injection\n"
+        "**[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · CVSS **9.8** · SQL Injection\n"
         "SQL injection in foo before 1.0.8\n"
-        "ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร — แก้: อัปเดตเป็น 1.0.8 ขึ้นไป · [patch](https://example.com/patch)"), out[0][1]
-    assert out[1][1].startswith("`9.3`  **[CVE-2025-2](https://nvd.nist.gov/vuln/detail/CVE-2025-2)**\n")  # unclassified: no label
-    assert out[1][1].endswith("— แก้: ยังไม่ระบุ — ดูที่ NVD")
+        "**ช่องทาง** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร\n"
+        "**วิธีแก้** อัปเดตเป็น 1.0.8 ขึ้นไป · [patch](https://example.com/patch)"), out[0][1]
+    assert out[1][1].startswith("**[CVE-2025-2](https://nvd.nist.gov/vuln/detail/CVE-2025-2)** · CVSS **9.3**\n")  # no label
+    assert out[1][1].endswith("\n**วิธีแก้** ยังไม่ระบุ ดูรายละเอียดที่ NVD")
     feed = watch.nvd_feed(out * 40)
     assert len(feed) > 1 and all(len(e["description"]) <= 4096 for _, e in feed)
     assert sum(len(k) for k, _ in feed) == 2 * 2 * 40  # every CVE's keys land in some message
@@ -153,18 +154,21 @@ def test_kev():
     assert [k[0] for k, _ in out] == ["kev:CVE-new", "kev:CVE-again"], out  # reported CVE now exploited = alert again
     e = out[0][1]
     assert e["title"] == "Apple macOS Kernel Vulnerability" and e["author"]["name"] == "🚨 ถูกโจมตีจริง · CISA KEV"
-    lines = e["description"].split("\n")
-    assert lines[0] == "**ประเภท** Memory Corruption — ทำให้โปรแกรมล่ม ข้อมูลรั่ว หรือรันโค้ดได้"
-    assert lines[1] == "**ช่องทางโจมตี** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร"
-    assert lines[2].startswith("**ต้องแก้** ติดตั้งอัปเดต") and lines[3] == "**Ransomware** **ถูกใช้ในแคมเปญ ransomware แล้ว**"
+    assert e["description"] == "Kernel bug"
+    names = [f["name"] for f in e["fields"]]
+    assert names == ["ประเภทการโจมตี", "ช่องทางโจมตี", "วิธีแก้", "CVE", "CVSS", "ต้องแพตช์ภายใน", "Ransomware", "ลิงก์"], names
     fields = {f["name"]: f["value"] for f in e["fields"]}
+    assert fields["ประเภทการโจมตี"] == "**Memory Corruption**\nทำให้โปรแกรมล่ม ข้อมูลรั่ว หรือรันโค้ดได้"
+    assert fields["ช่องทางโจมตี"] == "ผ่านอินเทอร์เน็ต\nไม่ต้องล็อกอิน\nเหยื่อไม่ต้องทำอะไร"
+    assert fields["วิธีแก้"].startswith("1. ติดตั้งอัปเดต") and "\n2. ถ้ายังไม่มีวิธีแก้" in fields["วิธีแก้"]
+    assert fields["Ransomware"] == "**ถูกใช้ในแคมเปญ ransomware แล้ว**"
     assert fields["CVSS"] == "**9.8**" and fields["ต้องแพตช์ภายใน"] == "<t:1794700800:D>\n<t:1794700800:R>"  # 2026-11-15 UTC
     assert fields["ลิงก์"] == ("[support.apple.com](https://support.apple.com/1234) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-new)"
                                " · [CWE-787](https://cwe.mitre.org/data/definitions/787.html)"), fields["ลิงก์"]
     # NVD lookup failed or had nothing: still a complete alert, just without CVSS or attack path
     again = out[1][1]
-    assert {f["name"]: f["value"] for f in again["fields"]}["CVSS"] == "-"
-    assert "ช่องทางโจมตี" not in again["description"] and "Ransomware" not in again["description"]
+    again_fields = {f["name"]: f["value"] for f in again["fields"]}
+    assert again_fields["CVSS"] == "-" and "ช่องทางโจมตี" not in again_fields and "Ransomware" not in again_fields
 
 
 def test_fix_cmd():
@@ -206,7 +210,7 @@ def test_digest_and_prune():
 def test_digest_run_count():
     fresh = lambda: {"digest": "2026-10-24", "seen": {}}
     ok = watch.digest(fresh(), NOW, lambda since: 286)
-    assert ok["color"] == watch.GREEN and "description" not in ok and ok["fields"][-1]["value"] == "**286** รอบ"
+    assert ok["color"] == watch.GREEN and ok["description"] == "ตัวเฝ้ายังทำงานปกติ" and ok["fields"][-1]["value"] == "**286** รอบ"
     slow = watch.digest(fresh(), NOW, lambda since: 7)  # Worker dead: only GitHub's own sparse cron ran
     assert slow["color"] == watch.YELLOW and "7 รอบ" in slow["description"]
 
