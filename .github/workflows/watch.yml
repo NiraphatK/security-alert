@@ -24,6 +24,10 @@ jobs:
     timeout-minutes: 10 # every source down at once: 3 tries x 30 s timeout each, plus backoff
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the branch tip when the job starts, not the commit when it was queued: a run that waited
+          # behind another must see the state.json that run just pushed, or it re-sends those alerts
+          ref: main
 
       - run: python3 watch.py
         env:
@@ -41,13 +45,29 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "state: $(date -u +%FT%TZ)"
           git pull -q --rebase && git push -q
 
+      # Runs every 5 minutes, so announce only the change: the first failed run and the first good one after
       - name: Tell Discord the watcher broke
         if: failure()
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          prev=$(gh run list -w watch.yml -s completed -L 1 --json conclusion -q '.[0].conclusion' || true)
+          [ "$prev" = failure ] && exit 0
           curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
             "allowed_mentions": {"parse": []},
             "embeds": [{"title": "ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว", "url": "'"$RUN"'", "color": 16762173,
-                        "description": "รอบนี้ไม่ได้ส่งข่าว\nกดหัวข้อเพื่อดู log บน GitHub Actions"}]}'
+                        "description": "รอบนี้ไม่ได้ส่งข่าว\nกดหัวข้อเพื่อดู log บน GitHub Actions\nจะแจ้งอีกครั้งเมื่อกลับมาทำงานปกติ"}]}'
+
+      - name: Tell Discord the watcher recovered
+        if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh run list -w watch.yml -s completed -L 1 --json conclusion -q '.[0].conclusion' || true)
+          [ "$prev" = failure ] || exit 0
+          curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
+            "allowed_mentions": {"parse": []},
+            "embeds": [{"title": "ตัวเฝ้าข่าวช่องโหว่กลับมาทำงานปกติแล้ว", "color": 3187820}]}'

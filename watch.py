@@ -8,6 +8,7 @@ Sources, most urgent first:
 Env: DISCORD_WEBHOOK (unset = dry run: print, keep no state), GITHUB_TOKEN, NVD_API_KEY (optional),
      PREVIEW=true (post one sample of each message type, touch no state).
 """
+import gzip
 import http.client
 import json
 import os
@@ -25,16 +26,21 @@ GHSA_SEVERITIES = {"critical"}
 NVD_MIN_SCORE = 9.0
 MUTE_WORDS = ("wordpress",)  # matched against NVD descriptions; KEV is never muted
 MUTE_CNAS = {"audit@patchstack.com", "security@wordfence.com"}  # WordPress-plugin-only CNAs
-LOOKBACK = timedelta(hours=24)  # wide enough to ride out delayed or skipped Actions runs
-NVD_LOOKBACK = timedelta(hours=72)  # many CVEs get their score a day or two after publishing
+# How far back each run looks. With the seen set (kept KEEP_SEEN) this rides out skipped runs and source
+# outages: anything new inside the window that hasn't gone out yet goes out now.
+KEV_LOOKBACK = timedelta(days=7)  # the feed is small, and an exploited-in-the-wild alert must never be lost
+GHSA_LOOKBACK = timedelta(days=3)
+NVD_LOOKBACK = timedelta(hours=72)  # also: many CVEs get their score a day or two after publishing
 KEEP_SEEN = timedelta(days=30)
 FAIL_ALERT_AFTER = 6  # consecutive failed runs (~30 min at */5) before saying a source is down
 DIGEST_HOUR_UTC = 2  # 09:00 Asia/Bangkok
 MIN_RUNS_PER_DAY = 144  # the Worker in trigger/ dispatches 288 a day; under half means it is broken
+TRIGGER_STALE = timedelta(minutes=20)  # no dispatch for this long, seen from a GitHub-cron run: the Worker is down
 
 HOOK = os.environ.get("DISCORD_WEBHOOK")
 STATE = Path(__file__).with_name("state.json")
 UA = "DiscordBot (https://github.com/NiraphatK/security-alert, 1)"  # Discord's CDN rejects urllib's default UA
+README = "https://github.com/NiraphatK/security-alert#readme"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 GHSA_URL = "https://api.github.com/advisories?type=reviewed&sort=updated&direction=desc&per_page=100"
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -114,11 +120,13 @@ def md(s):
 
 
 def fetch(url, headers=None, tries=3, timeout=30):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
+    # gzip: the KEV and NVD feeds are ~1.8 MB each per run, ~10x smaller compressed
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip", **(headers or {})})
     for attempt in range(tries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.load(r), r.headers
+                body = r.read()
+                return json.loads(gzip.decompress(body) if r.headers.get("Content-Encoding") == "gzip" else body), r.headers
         except (OSError, ValueError, http.client.HTTPException):
             if attempt == tries - 1:
                 raise
@@ -313,6 +321,8 @@ def match_ghsa(advisories, taken, cutoff):
             "color": PURPLE,
             "fields": attack_fields(kind, attack_path(best.get("vector_string")))
                       + [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]]
+                      + ([{"name": "package อื่น", "value": f"และอีก {len(packages) - 5} package ดูทั้งหมดที่ GitHub Advisory"}]
+                         if len(packages) > 5 else [])
                       + [links(("GitHub Advisory", a["html_url"]), ("NVD", a.get("cve_id") and nvd_url(a["cve_id"])),
                                (cwe := main_cwe(cwes), cwe and cwe_url(cwe)))],
             "footer": {"text": " · ".join(filter(None, [a.get("cve_id"), a["ghsa_id"]]))},
@@ -421,27 +431,34 @@ def match_kev(vulns, taken, cutoff, lookup=lambda cve: None):
     return out
 
 
-# --- health & digest -----------------------------------------------------------------------------
+# --- watcher health ------------------------------------------------------------------------------
+# Notices are (embed, commit). `commit` records that the notice went out and runs only once Discord has
+# accepted it, so a notice whose post failed is sent again next run instead of being lost.
 
 def health(fail, name, err=None):
-    """Count consecutive failures; speak only on the Nth failure and on recovery, not every run."""
+    """Count consecutive failures per source; speak once when it reaches FAIL_ALERT_AFTER and once on recovery.
+    The count stops at the threshold, so a long outage doesn't rewrite state.json every run."""
+    n = fail.get(name, 0)
     if err:
-        fail[name] = fail.get(name, 0) + 1
-        if fail[name] == FAIL_ALERT_AFTER:
-            return {"title": f"ดึงข่าวจาก {name} ไม่ได้", "color": YELLOW,
-                    "description": f"ล้มเหลว {FAIL_ALERT_AFTER} รอบติดกัน (ประมาณ {FAIL_ALERT_AFTER * 5} นาที)\n"
-                                   f"แหล่งอื่นยังทำงานปกติ\n```{cut(repr(err), 300)}```"}
-    elif fail.pop(name, 0) >= FAIL_ALERT_AFTER:
-        return {"title": f"{name} กลับมาใช้ได้แล้ว", "color": GREEN}
+        if n < FAIL_ALERT_AFTER - 1:
+            fail[name] = n + 1
+        elif n == FAIL_ALERT_AFTER - 1:
+            return ({"title": f"ดึงข่าวจาก {name} ไม่ได้", "color": YELLOW,
+                     "description": f"ล้มเหลว {FAIL_ALERT_AFTER} รอบติดกัน (ประมาณ {FAIL_ALERT_AFTER * 5} นาที)\n"
+                                    f"แหล่งอื่นยังทำงานปกติ\n```{cut(repr(err), 300)}```"},
+                    lambda: fail.__setitem__(name, FAIL_ALERT_AFTER))
+    elif n >= FAIL_ALERT_AFTER:
+        return {"title": f"{name} กลับมาใช้ได้แล้ว", "color": GREEN}, lambda: fail.pop(name, None)
+    else:
+        fail.pop(name, None)
 
 
 def digest(state, now, runs=lambda since: None):
-    """Once a day: what went out in the last 24 h. Doubles as a heartbeat — silence means the watcher is dead,
+    """Once a day: what went out in the last 24 h. Doubles as a heartbeat (silence means the watcher is dead),
     and a low run count means the 5-minute trigger is (GitHub's own cron alone fires every few hours)."""
     today = now.date().isoformat()
     if now.hour < DIGEST_HOUR_UTC or state.get("digest") == today:
         return None
-    state["digest"] = today
     since = now - timedelta(days=1)
     n = Counter(k.split(":")[0] for k, t in state["seen"].items() if ts(t) >= since)
     try:
@@ -465,7 +482,38 @@ def digest(state, now, runs=lambda since: None):
         embed["description"] = (f"**รอบตรวจน้อยผิดปกติ: {count} รอบ (ปกติประมาณ 288)**\n"
                                 "ตัวสั่งรันทุก 5 นาทีใน Cloudflare อาจหยุดทำงาน หรือ GitHub token หมดอายุ\n"
                                 "ข่าวยังมาตามปกติ แต่จะช้าลงหลายชั่วโมง")
-    return embed
+    return embed, lambda: state.__setitem__("digest", today)
+
+
+def last_dispatch():
+    """When this workflow was last dispatched (by the Worker in trigger/), or None if never."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "NiraphatK/security-alert")
+    d, _ = fetch(f"https://api.github.com/repos/{repo}/actions/workflows/watch.yml/runs?event=workflow_dispatch&per_page=1",
+                 gh_headers())
+    return ts(d["workflow_runs"][0]["created_at"]) if d["workflow_runs"] else None
+
+
+def trigger_check(state, now, event, dispatched=last_dispatch):
+    """GitHub's own cron is only the fallback. When it is what started this run and the Worker hasn't dispatched
+    for TRIGGER_STALE, the 5-minute trigger is down (most often its GitHub token expired): say so once."""
+    if event == "workflow_dispatch" and state.get("trigger_down"):
+        return {"title": "ตัวสั่งรันทุก 5 นาทีกลับมาทำงานแล้ว", "color": GREEN}, lambda: state.pop("trigger_down", None)
+    if event != "schedule" or state.get("trigger_down"):
+        return None
+    try:
+        last = dispatched()
+    except Exception as e:  # can't tell; don't cry wolf
+        print(f"last dispatch: {e!r}", file=sys.stderr)
+        return None
+    if last and now - last < TRIGGER_STALE:
+        return None
+    gap = f"{int((now - last).total_seconds() // 60)} นาที" if last else "นานแล้ว"
+    return ({"title": "ตัวสั่งรันทุก 5 นาทีหยุดทำงาน", "url": README, "color": YELLOW,
+             "description": f"Cloudflare Worker ไม่ได้สั่งรันมา {gap}\n"
+                            "ตอนนี้เหลือแค่รอบสำรองของ GitHub ซึ่งห่างกันหลายชั่วโมง ข่าวจะมาช้า\n\n"
+                            "**สาเหตุที่พบบ่อย** GitHub token ของ Worker หมดอายุ\n"
+                            "**วิธีแก้** กดหัวข้อนี้ แล้วทำตามหัวข้อเปลี่ยน token ใน README"},
+            lambda: state.__setitem__("trigger_down", True))
 
 
 def prune(seen, now):
@@ -475,16 +523,27 @@ def prune(seen, now):
 
 # --- discord -------------------------------------------------------------------------------------
 
+class Rejected(Exception):
+    """Discord refused the message (a 4xx other than 429): sending the same thing again won't help."""
+
+
 def size(e):
-    return (len(e.get("title", "")) + len(e.get("description", "")) + len(e.get("footer", {}).get("text", ""))
+    return (len(e.get("title") or "") + len(e.get("description") or "") + len(e.get("footer", {}).get("text", ""))
             + len(e.get("author", {}).get("name", "")) + sum(len(f["name"]) + len(f["value"]) for f in e.get("fields", [])))
+
+
+def fit(e, limit=5900):
+    """Drop fields from the end, keeping the last one (the links), until the embed is under Discord's 6000 cap."""
+    while size(e) > limit and len(e.get("fields", [])) > 1:
+        del e["fields"][-2]
+    return e
 
 
 def batches(alerts):
     """Pack alerts into messages within Discord's limits: 10 embeds and 6000 characters each."""
     batch, total = [], 0
     for a in alerts:
-        n = size(a[1])
+        n = size(fit(a[1]))
         if batch and (len(batch) == 10 or total + n > 6000):
             yield batch
             batch, total = [], 0
@@ -495,19 +554,29 @@ def batches(alerts):
 
 
 def post(payload):
+    """Send one message, retrying rate limits, Discord-side errors and timeouts. Raises Rejected on a 4xx."""
     if not HOOK:
         print(json.dumps(payload, ensure_ascii=False, indent=1))
         return
     req = urllib.request.Request(HOOK, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "User-Agent": UA})
-    for _ in range(5):
+    for attempt in range(5):
         try:
             urllib.request.urlopen(req, timeout=30).close()
             return
         except urllib.error.HTTPError as e:
-            if e.code != 429:
-                raise
-            time.sleep(float(json.loads(e.read() or b"{}").get("retry_after", 2)))
-    raise RuntimeError("Discord kept rate-limiting")
+            body = e.read()
+            if e.code == 429:
+                try:
+                    time.sleep(float(json.loads(body)["retry_after"]))
+                except (ValueError, KeyError, TypeError):
+                    time.sleep(2)
+                continue
+            if e.code < 500:
+                raise Rejected(f"Discord {e.code}: {body[:500].decode(errors='replace')}") from None
+        except (OSError, http.client.HTTPException):
+            pass
+        time.sleep(5 * (attempt + 1))
+    raise RuntimeError("Discord unreachable after 5 tries")
 
 
 def save(state):
@@ -516,15 +585,34 @@ def save(state):
 
 
 def send(alerts, state, now, ping=False):
+    """Post alerts, marking each seen once Discord has it. A message Discord rejects is retried one alert at a
+    time, and an alert it still rejects goes out as a bare link to its source and is marked seen, so one bad
+    alert can't hold back the rest run after run. Returns the rejections, for the log."""
+    def message(embeds):
+        return {"content": "@here" if ping else "", "embeds": embeds,
+                "allowed_mentions": {"parse": ["everyone"] if ping else []}}  # feed text must never ping anyone
+
+    rejected = []
     for batch in batches(alerts):
-        post({
-            "content": "@here" if ping else "",
-            "embeds": [e for _, e in batch],
-            "allowed_mentions": {"parse": ["everyone"] if ping else []},  # feed text must never ping anyone
-        })
+        try:
+            post(message([e for _, e in batch]))
+        except Rejected as err:
+            if len(batch) > 1:
+                for alert in batch:
+                    rejected += send([alert], state, now, ping)
+                continue
+            keys, e = batch[0]
+            rejected.append(f"{keys[0]}: {err}")
+            bare = {"title": cut(e.get("title") or keys[0], 256), "url": e.get("url"), "color": e.get("color"),
+                    "description": "ข้อความเต็มส่งไม่ได้ (Discord ปฏิเสธ)\nกดหัวข้อเพื่อดูรายละเอียดที่ต้นทาง"}
+            try:
+                post(message([{k: v for k, v in bare.items() if v}]))
+            except Rejected:
+                pass
         for keys, _ in batch:
             state["seen"].update(dict.fromkeys(keys, now.isoformat(timespec="seconds")))
         save(state)  # after every message, so a crash mid-run neither repeats nor loses alerts
+    return rejected
 
 
 def main():
@@ -533,8 +621,8 @@ def main():
     state = {"seen": {}, "fail": {}, "digest": now.date().isoformat()} if first else json.loads(STATE.read_text())
     taken, news, kev, notices, errors = set(state["seen"]), [], [], [], []
     sources = [  # KEV first so a slow NVD can't hold it up; GitHub before NVD so NVD skips CVEs it covered
-        ("CISA KEV", kev, lambda: match_kev(get_kev(), taken, now - LOOKBACK, nvd_lookup())),
-        ("GitHub Advisory", news, lambda: match_ghsa(get_ghsa(now - LOOKBACK), taken, now - LOOKBACK)),
+        ("CISA KEV", kev, lambda: match_kev(get_kev(), taken, now - KEV_LOOKBACK, nvd_lookup())),
+        ("GitHub Advisory", news, lambda: match_ghsa(get_ghsa(now - GHSA_LOOKBACK), taken, now - GHSA_LOOKBACK)),
         ("NVD", news, lambda: nvd_feed(match_nvd(get_nvd(now), taken, now - NVD_LOOKBACK))),
     ]
     for name, bucket, run in sources:
@@ -548,28 +636,34 @@ def main():
         if notice := health(state["fail"], name, err):
             notices.append(notice)
 
-    if first and HOOK:  # seed quietly instead of flooding the channel with the past day
-        backdated = (now - LOOKBACK).isoformat(timespec="seconds")  # keeps them out of the first digest
+    if first and HOOK:  # seed quietly instead of flooding the channel with the past days
+        backdated = (now - timedelta(days=1)).isoformat(timespec="seconds")  # keeps them out of the first digest
         for keys, _ in news + kev:
             state["seen"].update(dict.fromkeys(keys, backdated))
-        notices.append({
+        notices.append(({
             "title": "เริ่มเฝ้าระวังแล้ว", "color": GREEN,
             "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ\nจากนี้แจ้งทันทีที่มีของใหม่\n\n"
                            "- **ถูกโจมตีจริง** แจ้งพร้อม @here\n- **Open-source critical** พร้อมคำสั่งอัปเกรด\n- **CVE ร้ายแรงใหม่** ทุก vendor",
-        })
+        }, lambda: None))
         news, kev = [], []
 
     prune(state["seen"], now)
+    rejected = []
     try:
-        send(kev, state, now, ping=True)
-        send(news, state, now)
-        if notice := digest(state, now, count_runs):
-            notices.append(notice)
+        rejected += send(kev, state, now, ping=True)
+        rejected += send(news, state, now)
+        for notice in (digest(state, now, count_runs), trigger_check(state, now, os.environ.get("GITHUB_EVENT_NAME"))):
+            if notice:
+                notices.append(notice)
         if notices:
-            post({"embeds": notices, "allowed_mentions": {"parse": []}})
+            post({"embeds": [fit(e) for e, _ in notices], "allowed_mentions": {"parse": []}})
+            for _, commit in notices:
+                commit()
     finally:
         save(state)
     print(f"sent: kev={len(kev)} news={len(news)} notices={len(notices)} failed_sources={errors}")
+    if rejected:  # fail this one run, so the workflow's failure notice points at a log naming what Discord refused
+        sys.exit("Discord rejected:\n" + "\n".join(rejected))
 
 
 def preview(now):
@@ -578,7 +672,7 @@ def preview(now):
     latest_kev = max(get_kev(), key=lambda v: v["dateAdded"])
     samples = (match_kev([latest_kev], set(), week, nvd_lookup()) + match_ghsa(get_ghsa(week), set(), week)[:1]
                + nvd_feed(match_nvd(get_nvd(now), set(), now - NVD_LOOKBACK)[:4]))
-    samples.append(([], digest({"seen": {}}, now.replace(hour=12))))
+    samples.append(([], digest({"seen": {}}, now.replace(hour=12))[0]))
     for i, batch in enumerate(batches(samples)):
         post({"content": "ตัวอย่างหน้าตาข้อความ (ข้อมูลจริงจากสัปดาห์นี้)" if i == 0 else "",
               "embeds": [e for _, e in batch], "allowed_mentions": {"parse": []}})

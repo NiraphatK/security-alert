@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import watch
 
 NOW = datetime(2026, 10, 25, 12, tzinfo=UTC)
-CUT = NOW - watch.LOOKBACK
+CUT = NOW - timedelta(hours=24)
 NET_NOAUTH = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 
 
@@ -185,12 +185,33 @@ def test_batches():
 
 
 def test_health():
-    fail = {}
-    said = [watch.health(fail, "NVD", OSError("down")) for _ in range(watch.FAIL_ALERT_AFTER + 3)]
-    assert [s is not None for s in said].count(True) == 1 and said[watch.FAIL_ALERT_AFTER - 1]["title"] == "ดึงข่าวจาก NVD ไม่ได้"
-    assert watch.health(fail, "NVD")["title"] == "NVD กลับมาใช้ได้แล้ว" and "NVD" not in fail
+    fail, said = {}, []
+    for _ in range(watch.FAIL_ALERT_AFTER + 3):
+        if notice := watch.health(fail, "NVD", OSError("down")):
+            said.append(notice[0]["title"])
+            notice[1]()  # Discord took it
+    assert said == ["ดึงข่าวจาก NVD ไม่ได้"] and fail["NVD"] == watch.FAIL_ALERT_AFTER  # once, then the count stops
+    before = dict(fail)
+    watch.health(fail, "NVD", OSError("still down"))
+    assert fail == before  # a long outage doesn't rewrite state.json every run
+    embed, commit = watch.health(fail, "NVD")
+    assert embed["title"] == "NVD กลับมาใช้ได้แล้ว"
+    commit()
+    assert "NVD" not in fail
     watch.health(fail, "KEV", OSError("blip"))
-    assert watch.health(fail, "KEV") is None  # a short blip recovers silently
+    assert watch.health(fail, "KEV") is None and "KEV" not in fail  # a short blip recovers silently
+
+
+def test_notice_kept_until_posted():
+    fail = {}
+    for _ in range(watch.FAIL_ALERT_AFTER - 1):
+        assert watch.health(fail, "NVD", OSError()) is None
+    assert watch.health(fail, "NVD", OSError()) is not None  # the 6th failure: a notice, whose post then fails
+    assert watch.health(fail, "NVD", OSError()) is not None  # so the next run offers it again
+    state = {"digest": "2026-10-24", "seen": {}}
+    assert watch.digest(state, NOW) and watch.digest(state, NOW)  # the day isn't done until the summary went out
+    watch.digest(state, NOW)[1]()
+    assert watch.digest(state, NOW) is None
 
 
 def test_digest_and_prune():
@@ -199,9 +220,10 @@ def test_digest_and_prune():
         "kev:A": iso(NOW - timedelta(hours=1)), "ghsa:B": iso(NOW - timedelta(hours=2)), "cve:B": iso(NOW - timedelta(hours=2)),
         "nvd:C": iso(NOW - timedelta(days=2)), "nvd:D": iso(NOW - timedelta(days=31)),
     }}
-    assert watch.digest(state, NOW.replace(hour=1), ) is None  # before 09:00 Bangkok
-    counts = [f["value"] for f in watch.digest(state, NOW)["fields"]]
-    assert counts == ["**1**", "**1**", "**0**"], counts  # kev, ghsa, nvd
+    assert watch.digest(state, NOW.replace(hour=1)) is None  # before 09:00 Bangkok
+    embed, commit = watch.digest(state, NOW)
+    assert [f["value"] for f in embed["fields"]] == ["**1**", "**1**", "**0**"]  # kev, ghsa, nvd
+    commit()
     assert watch.digest(state, NOW) is None  # once a day
     watch.prune(state["seen"], NOW)
     assert "nvd:D" not in state["seen"] and "nvd:C" in state["seen"]
@@ -209,15 +231,109 @@ def test_digest_and_prune():
 
 def test_digest_run_count():
     fresh = lambda: {"digest": "2026-10-24", "seen": {}}
-    ok = watch.digest(fresh(), NOW, lambda since: 286)
+    ok = watch.digest(fresh(), NOW, lambda since: 286)[0]
     assert ok["color"] == watch.GREEN and ok["description"] == "ตัวเฝ้ายังทำงานปกติ" and ok["fields"][-1]["value"] == "**286** รอบ"
-    slow = watch.digest(fresh(), NOW, lambda since: 7)  # Worker dead: only GitHub's own sparse cron ran
+    slow = watch.digest(fresh(), NOW, lambda since: 7)[0]  # Worker dead: only GitHub's own sparse cron ran
     assert slow["color"] == watch.YELLOW and "7 รอบ" in slow["description"]
 
     def broken(since):
         raise OSError("api down")
-    quiet = watch.digest(fresh(), NOW, broken)  # no count, but the heartbeat still goes out
+    quiet = watch.digest(fresh(), NOW, broken)[0]  # no count, but the heartbeat still goes out
     assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == ["ถูกโจมตีจริง", "Open-source", "CVE ใหม่"]
+
+
+def test_trigger_check():
+    stale, recent = (lambda: NOW - timedelta(hours=3)), (lambda: NOW - timedelta(minutes=4))
+    state = {}
+    assert watch.trigger_check(state, NOW, "schedule", recent) is None  # Worker fine; GitHub's cron also fired
+    assert watch.trigger_check(state, NOW, "workflow_dispatch", stale) is None  # a Worker-started run never checks
+    embed, commit = watch.trigger_check(state, NOW, "schedule", stale)
+    assert embed["title"] == "ตัวสั่งรันทุก 5 นาทีหยุดทำงาน" and "180 นาที" in embed["description"] and embed["url"] == watch.README
+    commit()
+    assert watch.trigger_check(state, NOW, "schedule", stale) is None  # said once
+    embed, commit = watch.trigger_check(state, NOW, "workflow_dispatch", recent)
+    assert embed["title"] == "ตัวสั่งรันทุก 5 นาทีกลับมาทำงานแล้ว"
+    commit()
+    assert "trigger_down" not in state
+
+    def broken():
+        raise OSError("api down")
+    assert watch.trigger_check({}, NOW, "schedule", broken) is None  # can't tell: stay quiet
+    assert watch.trigger_check({}, NOW, "schedule", lambda: None)[0]["title"] == "ตัวสั่งรันทุก 5 นาทีหยุดทำงาน"  # never ran
+
+
+def with_discord(responder, fn):
+    """Run fn against a fake Discord: `responder(payload)` returns the HTTP status. No real sleeping or saving."""
+    import io, json, urllib.error
+    saved = watch.HOOK, watch.urllib.request.urlopen, watch.time.sleep, watch.save
+    sent = []
+
+    def urlopen(req, timeout=None):
+        payload = json.loads(req.data)
+        code = responder(payload)
+        if code == 200:
+            sent.append(payload)
+            return io.BytesIO(b"")
+        body = b'{"retry_after": 0}' if code == 429 else b'{"message": "Invalid Form Body"}'
+        raise urllib.error.HTTPError(req.full_url, code, "error", {}, io.BytesIO(body))
+    watch.HOOK, watch.urllib.request.urlopen, watch.time.sleep, watch.save = "https://discord.invalid/x", urlopen, lambda s: None, lambda s: None
+    try:
+        return fn(), sent
+    finally:
+        watch.HOOK, watch.urllib.request.urlopen, watch.time.sleep, watch.save = saved
+
+
+def test_discord_rejection_is_isolated():
+    alerts = [(["ghsa:0"], {"title": "t0"}),
+              (["ghsa:1"], {"title": "t1", "url": "https://x/1", "fields": [{"name": "n", "value": "v"}]}),
+              (["ghsa:2"], {"title": "t2"})]
+    state = {"seen": {}}
+    rejects_fields = lambda p: 400 if any("fields" in e for e in p["embeds"]) else 200
+    rejected, sent = with_discord(rejects_fields, lambda: watch.send(alerts, state, NOW))
+    assert [e["title"] for p in sent for e in p["embeds"]] == ["t0", "t1", "t2"]  # the good ones still went out
+    bare = sent[1]["embeds"][0]
+    assert bare["url"] == "https://x/1" and "ส่งไม่ได้" in bare["description"]  # the bad one as a link to its source
+    assert set(state["seen"]) == {"ghsa:0", "ghsa:1", "ghsa:2"}  # so it won't block the next run either
+    assert len(rejected) == 1 and rejected[0].startswith("ghsa:1: Discord 400: ") and "Invalid Form Body" in rejected[0]
+
+
+def test_discord_retries():
+    codes = iter([500, 429, 200])
+    _, sent = with_discord(lambda p: next(codes), lambda: watch.post({"embeds": [{"title": "x"}]}))
+    assert len(sent) == 1  # a Discord-side error and a rate limit are both waited out
+    try:
+        with_discord(lambda p: 503, lambda: watch.post({"embeds": []}))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("gives up after 5 tries")
+
+
+def test_fit():
+    e = {"title": "t", "fields": [{"name": "p", "value": "x" * 1024} for _ in range(7)] + [{"name": "ลิงก์", "value": "l"}]}
+    watch.fit(e)
+    assert watch.size(e) <= 5900 and len(e["fields"]) == 6 and e["fields"][-1]["name"] == "ลิงก์"
+
+
+def test_fetch_gzip():
+    import gzip, io
+
+    class Response(io.BytesIO):
+        headers = {"Content-Encoding": "gzip"}
+    saved = watch.urllib.request.urlopen
+    watch.urllib.request.urlopen = lambda req, timeout=None: Response(gzip.compress(b'{"ok": 1}'))
+    try:
+        assert watch.fetch("https://x.example")[0] == {"ok": 1}
+    finally:
+        watch.urllib.request.urlopen = saved
+
+
+def test_ghsa_many_packages():
+    a = ghsa("GHSA-many")
+    a["vulnerabilities"] = [{"package": {"ecosystem": "npm", "name": f"p{i}"}, "vulnerable_version_range": "< 1.0.0",
+                             "first_patched_version": "1.0.0"} for i in range(8)]
+    fields = watch.match_ghsa([a], set(), CUT)[0][1]["fields"]
+    assert [f["name"] for f in fields].count("package อื่น") == 1 and fields[-2]["value"].startswith("และอีก 3 package")
 
 
 if __name__ == "__main__":

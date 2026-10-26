@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # keeps the SHA-pinned actions current; PRs run the test workflow before you merge
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # skip releases younger than a week: most hijacked releases are caught by then
+
+  - package-ecosystem: npm
+    directory: /trigger
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      trigger:
+        patterns: ["*"]
