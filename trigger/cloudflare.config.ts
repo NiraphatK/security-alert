@@ -7,6 +7,7 @@ export default defineConfig({
 		compatibilityDate: "2026-10-06",
 		entrypoint,
 		workersDev: false, // runs on cron only, so no public URL
+		observability: { enabled: true }, // keeps each cron run's error (e.g. GitHub's 401/403) in Workers Logs
 		env: {
 			GITHUB_TOKEN: bindings.secret(),
 		},
