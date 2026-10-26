@@ -1,4 +1,4 @@
-"""Critical vulnerability news -> Discord, with the fix in every alert.
+"""Critical vulnerability news -> Discord: what kind of attack it is, how it gets in, and how to fix it.
 
 Sources, most urgent first:
   CISA KEV         exploited in the wild (pings @here)
@@ -50,6 +50,52 @@ ECOSYSTEMS = {"npm": "npm", "pip": "PyPI", "rust": "Rust", "go": "Go", "maven": 
               "rubygems": "Ruby", "nuget": ".NET", "pub": "Dart", "swift": "Swift", "erlang": "Erlang", "actions": "GitHub Actions"}
 RED, ORANGE, PURPLE, GREEN, YELLOW = 0xE5484D, 0xF76B15, 0x8E4EC6, 0x30A46C, 0xFFC53D
 
+# (CWEs, fallback keywords, attack name, what the attacker gets). A record's own CWE order wins (its first is
+# usually the primary); the keywords are only tried against the text when none of its CWEs is listed here.
+ATTACKS = [
+    (("CWE-94", "CWE-95", "CWE-917", "CWE-1336"), ("remote code execution", "code injection", "template injection"),
+     "Remote Code Execution", "รันโค้ดบนเครื่องเป้าหมายได้ = ยึดเครื่องได้"),
+    (("CWE-77", "CWE-78", "CWE-88"), ("command injection",), "Command Injection", "สั่งรันคำสั่ง OS บนเซิร์ฟเวอร์ได้"),
+    (("CWE-502",), ("deserializ",), "Insecure Deserialization", "ส่งข้อมูลที่ปั้นมาให้ระบบแปลงกลับแล้วรันโค้ดได้"),
+    (("CWE-89", "CWE-564"), ("sql injection",), "SQL Injection", "อ่าน แก้ หรือลบข้อมูลในฐานข้อมูลได้"),
+    (("CWE-434",), ("file upload",), "Unrestricted File Upload", "อัปโหลดไฟล์อันตราย เช่น web shell แล้วสั่งรันได้"),
+    (("CWE-98",), ("file inclusion",), "File Inclusion", "ให้เซิร์ฟเวอร์โหลดไฟล์หรือโค้ดที่ผู้โจมตีกำหนด"),
+    (("CWE-287", "CWE-288", "CWE-290", "CWE-294", "CWE-306", "CWE-1390"), ("authentication bypass", "missing authentication"),
+     "Authentication Bypass", "เข้าระบบได้โดยไม่ต้องล็อกอิน"),
+    (("CWE-798", "CWE-259", "CWE-1392", "CWE-1393"), ("hard-coded", "hardcoded", "default credential"),
+     "Hard-coded Credentials", "ใช้รหัสผ่านที่ฝังมากับระบบเข้าใช้งานได้"),
+    (("CWE-250", "CWE-266", "CWE-269", "CWE-284", "CWE-285", "CWE-639", "CWE-862", "CWE-863"),
+     ("privilege escalation", "elevation of privilege", "missing authorization", "access control"),
+     "Privilege Escalation", "ทำสิ่งที่ไม่ได้รับอนุญาตหรือยกระดับสิทธิ์ตัวเองได้"),
+    (("CWE-415", "CWE-416"), ("use-after-free", "use after free", "double free"), "Use-After-Free", "ทำให้โปรแกรมล่มหรือรันโค้ดได้"),
+    (("CWE-843",), ("type confusion",), "Type Confusion", "ทำให้โปรแกรมล่มหรือรันโค้ดได้"),
+    (("CWE-119", "CWE-120", "CWE-121", "CWE-122", "CWE-125", "CWE-131", "CWE-190", "CWE-191", "CWE-680", "CWE-787", "CWE-788", "CWE-805"),
+     ("buffer overflow", "out-of-bounds", "heap overflow", "integer overflow", "memory corruption"),
+     "Memory Corruption", "ทำให้โปรแกรมล่ม ข้อมูลรั่ว หรือรันโค้ดได้"),
+    (("CWE-22", "CWE-23", "CWE-24", "CWE-35", "CWE-36", "CWE-73"), ("path traversal", "directory traversal"),
+     "Path Traversal", "อ่านหรือเขียนไฟล์นอกโฟลเดอร์ที่อนุญาตได้"),
+    (("CWE-918",), ("server-side request forgery", "ssrf"), "SSRF", "หลอกให้เซิร์ฟเวอร์ส่ง request เข้าระบบภายในได้"),
+    (("CWE-611",), ("xml external entit", "xxe"), "XXE", "อ่านไฟล์บนเซิร์ฟเวอร์ผ่าน XML ที่ปั้นมาได้"),
+    (("CWE-1321",), ("prototype pollution",), "Prototype Pollution", "แก้ object พื้นฐานของ JavaScript จนพฤติกรรมเปลี่ยนหรือรันโค้ดได้"),
+    (("CWE-295", "CWE-297", "CWE-345", "CWE-347"), ("certificate validation", "signature verification", "signature validation"),
+     "Signature / Certificate Bypass", "ปลอมตัวหรือแก้ข้อมูลที่ควรถูกป้องกันด้วยลายเซ็นได้"),
+    (("CWE-79", "CWE-80"), ("cross-site scripting", "xss"), "Cross-Site Scripting (XSS)", "ฝังสคริปต์ในหน้าเว็บเพื่อขโมย session ของผู้ใช้"),
+    (("CWE-352",), ("cross-site request forgery", "csrf"), "CSRF", "หลอกให้ผู้ใช้ที่ล็อกอินอยู่ทำคำสั่งโดยไม่รู้ตัว"),
+    (("CWE-200", "CWE-209", "CWE-532", "CWE-538", "CWE-552"), ("information disclosure", "sensitive information"),
+     "Information Disclosure", "ข้อมูลสำคัญรั่วไหลได้"),
+    (("CWE-400", "CWE-476", "CWE-674", "CWE-770", "CWE-835", "CWE-1333"), ("denial of service", "denial-of-service"),
+     "Denial of Service", "ทำให้ระบบล่มหรือใช้งานไม่ได้"),
+]
+CWE_ATTACK = {cwe: (name, impact) for cwes, _, name, impact in ATTACKS for cwe in cwes}
+# CVSS vector metrics -> how the attack is delivered
+ATTACK_VECTOR = {"N": "ผ่านอินเทอร์เน็ต", "A": "ต้องอยู่ในเครือข่ายเดียวกัน", "L": "ต้องเข้าเครื่องได้ก่อน", "P": "ต้องเข้าถึงตัวเครื่อง"}
+PRIVILEGES = {"N": "ไม่ต้องล็อกอิน", "L": "ต้องมีบัญชีผู้ใช้", "H": "ต้องมีสิทธิ์ admin"}
+INTERACTION = {"N": "เหยื่อไม่ต้องทำอะไร", "R": "ต้องหลอกให้เหยื่อกดหรือเปิดไฟล์", "A": "ต้องหลอกให้เหยื่อกดหรือเปิดไฟล์",
+               "P": "ต้องให้เหยื่อเปิดดูเนื้อหา"}
+VERSION = r"v?\d+(?:\.[0-9A-Za-z-]+)+"
+FIXED_IN = re.compile(rf"\b(?:before|prior to|fixed in|patched in|upgrade to|until)\s+(?:versions?\s+)?"
+                      rf"({VERSION}(?:(?:,\s*|,?\s+(?:and|or)\s+){VERSION})*)", re.I)
+
 
 def ts(s):
     d = datetime.fromisoformat(s)
@@ -66,14 +112,14 @@ def md(s):
     return re.sub(r"([\\*_~`|\[\]()<>#])", r"\\\1", " ".join((s or "").split()))
 
 
-def fetch(url, headers=None):
+def fetch(url, headers=None, tries=3, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
-    for attempt in range(3):
+    for attempt in range(tries):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.load(r), r.headers
         except (OSError, ValueError, http.client.HTTPException):
-            if attempt == 2:
+            if attempt == tries - 1:
                 raise
             time.sleep(5 * (attempt + 1))
 
@@ -101,13 +147,16 @@ def get_ghsa(cutoff):
     return items
 
 
+def nvd_headers():
+    return {"apiKey": key} if (key := os.environ.get("NVD_API_KEY")) else {}
+
+
 def get_nvd(now):
-    h = {"apiKey": key} if (key := os.environ.get("NVD_API_KEY")) else {}
     fmt = "%Y-%m-%dT%H:%M:%S.000Z"
     url = f"{NVD_URL}?pubStartDate={(now - NVD_LOOKBACK).strftime(fmt)}&pubEndDate={now.strftime(fmt)}&resultsPerPage=2000"
     cves, start = [], 0
     while True:
-        d, _ = fetch(f"{url}&startIndex={start}", h)
+        d, _ = fetch(f"{url}&startIndex={start}", nvd_headers())
         cves += [v["cve"] for v in d["vulnerabilities"]]
         start += len(d["vulnerabilities"])
         if not d["vulnerabilities"] or start >= d["totalResults"]:
@@ -115,8 +164,87 @@ def get_nvd(now):
         time.sleep(6)  # NVD's public rate limit is 5 requests per 30 s
 
 
+def nvd_lookup():
+    """KEV carries no CVSS, so look each new KEV CVE up in NVD. Best effort: after one failure it stops
+    asking, so an exploited-in-the-wild alert never waits on NVD being down."""
+    down = False
+
+    def lookup(cve_id):
+        nonlocal down
+        if down:
+            return None
+        try:
+            d, _ = fetch(f"{NVD_URL}?cveId={cve_id}", nvd_headers(), tries=1, timeout=20)
+            time.sleep(6)  # NVD's public rate limit is 5 requests per 30 s
+            return d["vulnerabilities"][0]["cve"] if d["vulnerabilities"] else None
+        except Exception as e:
+            print(f"NVD lookup {cve_id}: {e!r}", file=sys.stderr)
+            down = True
+    return lookup
+
+
 def get_kev():
     return fetch(KEV_URL)[0]["vulnerabilities"]
+
+
+# --- summary helpers: attack type, attack path and fix, in Thai, derived from the feeds' own data ---------
+
+def cwe_url(cwe):
+    return f"https://cwe.mitre.org/data/definitions/{cwe.removeprefix('CWE-')}.html"
+
+
+def nvd_url(cve):
+    return f"https://nvd.nist.gov/vuln/detail/{cve}"
+
+
+def main_cwe(cwes):
+    """The CWE the attack type came from (else the record's first), so the CWE link matches the label."""
+    return next((c for c in cwes if c in CWE_ATTACK), cwes[0] if cwes else None)
+
+
+def classify(cwes, text):
+    """(attack name, what the attacker gets) or None."""
+    if hit := next((CWE_ATTACK[c] for c in cwes if c in CWE_ATTACK), None):
+        return hit
+    text = (text or "").lower()
+    return next(((name, impact) for _, words, name, impact in ATTACKS if any(w in text for w in words)), None)
+
+
+def attack_type(cwes, text, names=None):
+    if hit := classify(cwes, text):
+        return f"{hit[0]} — {hit[1]}"
+    if cwes:  # no plain-language name for it; the CWE page explains it
+        return f"[{cwes[0]}{' ' + names[cwes[0]] if (names or {}).get(cwes[0]) else ''}]({cwe_url(cwes[0])})"
+
+
+def attack_path(vector):
+    """CVSS vector -> how the attack gets in, e.g. 'ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร'."""
+    m = dict(p.split(":", 1) for p in (vector or "").split("/") if ":" in p)
+    return " · ".join(t[m[k]] for k, t in (("AV", ATTACK_VECTOR), ("PR", PRIVILEGES), ("UI", INTERACTION)) if m.get(k) in t)
+
+
+def fixed_in(text):
+    """Fixed versions named in free text: 'before 1.0.8', 'prior to 36.0.19 and 43.0.0', 'fixed in 2.1.4'."""
+    return list(dict.fromkeys(v.removeprefix("v") for m in FIXED_IN.findall(text or "") for v in re.findall(VERSION, m)))[:4]
+
+
+def kev_fix(action):
+    a = (action or "").lower()
+    if "vendor instructions" in a:
+        return "ติดตั้งอัปเดตหรือทำตามวิธีแก้ของ vendor (ลิงก์ด้านล่าง)" + (
+            " — ถ้ายังไม่มีวิธีแก้ ให้หยุดใช้หรือปิดไม่ให้เข้าถึงจากอินเทอร์เน็ตชั่วคราว" if "discontinue" in a else "")
+    # requiredAction can trail CISA directive boilerplate; the first clause is the actual instruction
+    return cut(md(re.split(r"\.\s|, ensuring", action or "")[0]), 300)
+
+
+def summary(kind, path, fix, excerpt, warning=None):
+    rows = [("ประเภท", kind), ("ช่องทางโจมตี", path), ("ต้องแก้", fix), ("Ransomware", warning)]
+    text = "\n".join(f"**{label}** {value}" for label, value in rows if value)
+    return text + (f"\n\n> {cut(md(excerpt), 220)}" if excerpt else "")
+
+
+def links(*pairs):
+    return {"name": "ลิงก์", "value": " · ".join(f"[{label}]({url})" for label, url in pairs if url)}
 
 
 # --- matchers: pure, return [(keys, embed)] (NVD: lines); keys[0] is the alert's own id, the rest dedupe
@@ -148,15 +276,25 @@ def match_ghsa(advisories, taken, cutoff):
             p = v.get("package") or {}
             packages.setdefault((p.get("ecosystem", "?"), p.get("name", "?")), []).append(
                 (v.get("vulnerable_version_range"), v.get("first_patched_version")))
-        score = max(((s or {}).get("score") or 0 for s in (a.get("cvss_severities") or {}).values()), default=0)
+        best = max((s for s in (a.get("cvss_severities") or {}).values() if s and s.get("score")), key=lambda s: s["score"], default={})
+        cwes = [c["cwe_id"] for c in a.get("cwes") or []]
         body = " ".join(l for l in (a.get("description") or "").splitlines() if not l.lstrip().startswith("#"))
+        patched = any(f for ranges in packages.values() for _, f in ranges)
+        score = best.get("score")
         out.append((keys, {
             "author": {"name": f"CRITICAL{f' {score}' if score else ''} · GitHub Advisory"},
             "title": cut(a.get("summary"), 256),
             "url": a["html_url"],
-            "description": cut(md(body), 300),
+            "description": summary(
+                attack_type(cwes, f"{a.get('summary')} {body}", {c["cwe_id"]: c.get("name") for c in a.get("cwes") or []}),
+                attack_path(best.get("vector_string")),
+                "อัปเกรดเป็นเวอร์ชันที่แก้แล้ว (คำสั่งด้านล่าง)" if patched
+                else "ยังไม่มี patch — ติดตาม advisory และหยุดใช้หรือจำกัดการใช้งานชั่วคราว",
+                body),
             "color": PURPLE,
-            "fields": [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]],
+            "fields": [package_field(eco, name, ranges) for (eco, name), ranges in list(packages.items())[:5]]
+                      + [links(("GitHub Advisory", a["html_url"]), ("NVD", a.get("cve_id") and nvd_url(a["cve_id"])),
+                               (cwe := main_cwe(cwes), cwe and cwe_url(cwe)))],
             "footer": {"text": " · ".join(filter(None, [a.get("cve_id"), a["ghsa_id"]]))},
             "timestamp": ts(a["published_at"]).isoformat(),
         }))
@@ -164,72 +302,97 @@ def match_ghsa(advisories, taken, cutoff):
 
 
 def cvss(cve):
+    """Highest-scoring CVSS entry (NVD's own or the CNA's; v4, v3.1, v3.0) as (score, vector)."""
     m = cve.get("metrics", {})
-    return max((x["cvssData"]["baseScore"] for k in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30") for x in m.get(k, [])), default=0)
+    best = max((x["cvssData"] for k in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30") for x in m.get(k, [])),
+               key=lambda d: d["baseScore"], default={})
+    return best.get("baseScore", 0), best.get("vectorString", "")
+
+
+def nvd_cwes(cve):
+    return list(dict.fromkeys(d["value"] for w in cve.get("weaknesses", []) for d in w.get("description", [])
+                              if d["value"].startswith("CWE-")))
+
+
+def nvd_fix(desc, patch):
+    versions = fixed_in(desc)
+    if versions:
+        text = f"อัปเดตเป็น {' / '.join(versions)} ขึ้นไป" + (" (ตามสายเวอร์ชันที่ใช้)" if len(versions) > 1 else "")
+        return text + (f" · [patch]({patch})" if patch else "")
+    return f"[ติดตั้ง patch ของ vendor]({patch})" if patch else "ยังไม่ระบุ — ดูที่ NVD"
 
 
 def match_nvd(cves, taken, cutoff):
-    """NVD runs ~25-50 criticals a weekday, so each is one line (packed by `nvd_feed`), not a card."""
+    """NVD runs ~25-50 criticals a weekday, so each is a 3-line entry (packed by `nvd_feed`), not a card."""
     out = []
     for c in cves:
         keys = [f"nvd:{c['id']}", f"cve:{c['id']}"]
         desc = next((d["value"] for d in c.get("descriptions", []) if d["lang"] == "en"), "")
-        score = cvss(c)
+        score, vector = cvss(c)
         if (keys[1] in taken or score < NVD_MIN_SCORE or c.get("vulnStatus") == "Rejected"
                 or ts(c["published"]) < cutoff or int(c["id"].split("-")[1]) < cutoff.year - 1  # backfilled old bugs
                 or c.get("sourceIdentifier") in MUTE_CNAS or any(w in desc.lower() for w in MUTE_WORDS)):
             continue
         taken.update(keys)
-        fix = next((r["url"] for r in c.get("references", []) if FIX_TAGS & set(r.get("tags", []))), None)
-        head = f"`{score}`  **[{c['id']}](https://nvd.nist.gov/vuln/detail/{c['id']})**" + (f" · [patch]({fix})" if fix else "")
-        out.append((score, keys, f"{head}\n{cut(md(desc), 150)}"))
-    return [(keys, line) for _, keys, line in sorted(out, key=lambda x: -x[0])]  # worst first
+        cwes = nvd_cwes(c)
+        kind = classify(cwes, desc)
+        label = kind[0] if kind else (f"[{cwes[0]}]({cwe_url(cwes[0])})" if cwes else "")
+        patch = next((r["url"] for r in c.get("references", []) if FIX_TAGS & set(r.get("tags", []))), None)
+        head = f"`{score}`  **[{c['id']}]({nvd_url(c['id'])})**" + (f" · {label}" if label else "")
+        how = " — ".join(filter(None, [attack_path(vector), f"แก้: {nvd_fix(desc, patch)}"]))
+        out.append((score, keys, f"{head}\n{cut(md(desc), 140)}\n{how}"))
+    return [(keys, entry) for _, keys, entry in sorted(out, key=lambda x: -x[0])]  # worst first
 
 
-def nvd_feed(lines):
-    out, keys, entries = [], [], []
-    for k, entry in lines:
-        if entries and len("\n\n".join(entries + [entry])) > 3900:
-            out.append((keys, entries))
-            keys, entries = [], []
-        keys, entries = keys + k, entries + [entry]
-    if entries:
-        out.append((keys, entries))
+def nvd_feed(entries):
+    out, keys, batch = [], [], []
+    for k, entry in entries:
+        if batch and len("\n\n".join(batch + [entry])) > 3900:
+            out.append((keys, batch))
+            keys, batch = [], []
+        keys, batch = keys + k, batch + [entry]
+    if batch:
+        out.append((keys, batch))
     return [(k, {
         "author": {"name": "CVE ร้ายแรงใหม่ · NVD"},
-        "title": f"{len(e)} รายการ · CVSS ≥ {NVD_MIN_SCORE}",
-        "description": "\n\n".join(e),
+        "title": f"{len(b)} รายการ · CVSS ≥ {NVD_MIN_SCORE}",
+        "description": "\n\n".join(b),
         "color": ORANGE,
-        "footer": {"text": "กดเลข CVE เพื่อดูรายละเอียดและวิธีแก้"},
-    }) for k, e in out]
+        "footer": {"text": "กดเลข CVE เพื่อดูรายละเอียดเต็ม"},
+    }) for k, b in out]
 
 
-def match_kev(vulns, taken, cutoff):
+def match_kev(vulns, taken, cutoff, lookup=lambda cve: None):
+    """`lookup(cve_id)` returns the NVD record (for CVSS and the attack path) or None."""
     out, since = [], cutoff.date().isoformat()
     for v in vulns:
         keys = [f"kev:{v['cveID']}"]  # own namespace: a CVE we already reported becoming exploited is news
         if keys[0] in taken or v["dateAdded"] < since:
             continue
         taken.update(keys)
-        nvd_link = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
+        detail = lookup(v["cveID"]) or {}
+        score, vector = cvss(detail)
+        cwes = v.get("cwes") or nvd_cwes(detail)
         notes = (s.strip() for s in v.get("notes", "").split(";"))
         vendor = [u for u in notes if u.startswith("http") and not any(h in u for h in ("cisa.gov", "nvd.nist.gov"))]
-        links = [f"[{urllib.parse.urlsplit(u).hostname.removeprefix('www.')}]({u})" for u in vendor[:2]] + [f"[NVD]({nvd_link})"]
-        # requiredAction now trails CISA directive boilerplate; the first clause is the actual instruction
-        action = re.split(r"\.\s|, ensuring", v.get("requiredAction") or "")[0]
         due = v.get("dueDate")
         out.append((keys, {
             "author": {"name": "🚨 ถูกโจมตีจริง · CISA KEV"},
             "title": cut(v.get("vulnerabilityName") or f"{v['vendorProject']} {v['product']}", 256),
-            "url": nvd_link,
-            "description": cut(md(v.get("shortDescription")), 350),
+            "url": nvd_url(v["cveID"]),
+            "description": summary(
+                attack_type(cwes, f"{v.get('vulnerabilityName')} {v.get('shortDescription')}"),
+                attack_path(vector),
+                kev_fix(v.get("requiredAction")),
+                v.get("shortDescription"),
+                "**ถูกใช้ในแคมเปญ ransomware แล้ว**" if v.get("knownRansomwareCampaignUse") == "Known" else None),
             "color": RED,
             "fields": [
                 {"name": "CVE", "value": f"`{v['cveID']}`", "inline": True},
-                {"name": "แพตช์ภายใน", "value": f"<t:{int(ts(due).timestamp())}:D>\n<t:{int(ts(due).timestamp())}:R>" if due else "-", "inline": True},
-                {"name": "Ransomware", "value": "**ใช้แล้ว**" if v.get("knownRansomwareCampaignUse") == "Known" else "ยังไม่พบ", "inline": True},
-                {"name": "ต้องทำ", "value": cut(md(action), 300) or "-"},
-                {"name": "วิธีแก้", "value": " · ".join(links)},
+                {"name": "CVSS", "value": f"**{score}**" if score else "-", "inline": True},
+                {"name": "ต้องแพตช์ภายใน", "value": f"<t:{int(ts(due).timestamp())}:D>\n<t:{int(ts(due).timestamp())}:R>" if due else "-", "inline": True},
+                links(*[((urllib.parse.urlsplit(u).hostname or "advisory").removeprefix("www."), u) for u in vendor[:2]],
+                      ("NVD", nvd_url(v["cveID"])), (cwe := main_cwe(cwes), cwe and cwe_url(cwe))),
             ],
             "footer": {"text": f"{v['vendorProject']} · {v['product']}"},
         }))
@@ -332,10 +495,10 @@ def main():
     first = not STATE.exists()
     state = {"seen": {}, "fail": {}, "digest": now.date().isoformat()} if first else json.loads(STATE.read_text())
     taken, news, kev, notices, errors = set(state["seen"]), [], [], [], []
-    sources = [
+    sources = [  # KEV first so a slow NVD can't hold it up; GitHub before NVD so NVD skips CVEs it covered
+        ("CISA KEV", kev, lambda: match_kev(get_kev(), taken, now - LOOKBACK, nvd_lookup())),
         ("GitHub Advisory", news, lambda: match_ghsa(get_ghsa(now - LOOKBACK), taken, now - LOOKBACK)),
         ("NVD", news, lambda: nvd_feed(match_nvd(get_nvd(now), taken, now - NVD_LOOKBACK))),
-        ("CISA KEV", kev, lambda: match_kev(get_kev(), taken, now - LOOKBACK)),
     ]
     for name, bucket, run in sources:
         try:
@@ -375,7 +538,8 @@ def main():
 def preview(now):
     """PREVIEW=true: post one real sample of each message type from the past week; state is untouched."""
     week = now - timedelta(days=7)
-    samples = (match_kev(get_kev(), set(), week)[:1] + match_ghsa(get_ghsa(week), set(), week)[:1]
+    latest_kev = max(get_kev(), key=lambda v: v["dateAdded"])
+    samples = (match_kev([latest_kev], set(), week, nvd_lookup()) + match_ghsa(get_ghsa(week), set(), week)[:1]
                + nvd_feed(match_nvd(get_nvd(now), set(), now - NVD_LOOKBACK)[:4]))
     samples.append(([], digest({"seen": {}}, now.replace(hour=12))))
     for i, batch in enumerate(batches(samples)):
