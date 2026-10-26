@@ -1,79 +1,166 @@
 # security-alert
 
-แจ้งข่าวช่องโหว่ร้ายแรงเข้า Discord ภายในไม่กี่นาที ทุกข้อความบอกประเภทการโจมตี ช่องทางโจมตี วิธีแก้ และลิงก์
+Send critical vulnerability alerts to Discord from CISA KEV, GitHub Security Advisories, and NVD. Alerts include attack types, attack paths, remediation details, and source links when available.
 
-## แจ้งอะไรบ้าง
+A Cloudflare Worker requests a GitHub Actions run every five minutes. Discord notifications currently use Thai.
 
-| การ์ด | แหล่งข่าว | แจ้งเมื่อ |
-|---|---|---|
-| 🚨 ถูกโจมตีจริง (ping `@here`) | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | มีรายการใหม่ ทุกรายการ |
-| Open-source critical | [GitHub Advisory](https://github.com/advisories) | severity critical พร้อมเวอร์ชันที่แก้และคำสั่งอัปเกรด |
-| CVE ร้ายแรงใหม่ | [NVD](https://nvd.nist.gov) | CVSS 9.0 ขึ้นไป ทุก vendor (ไม่รวม plugin WordPress) |
+## Alert coverage
 
-## ทำงานยังไง
+| Alert | Source | Default behavior |
+| --- | --- | --- |
+| Actively exploited vulnerabilities | [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | Notify on newly added entries, with an `@here` mention. |
+| Critical open-source vulnerabilities | [GitHub Security Advisories](https://github.com/advisories) | Report reviewed critical advisories, including affected versions, patched versions, and upgrade commands where available. |
+| New critical CVEs | [NVD](https://nvd.nist.gov) | Report recent CVEs with CVSS scores of at least 9.0, across vendors. WordPress-related descriptions and selected WordPress plugin CNAs are filtered by default. |
 
+NVD entries are grouped into compact messages. CVEs already covered by GitHub advisories are skipped in the NVD feed; a later KEV listing still generates an exploitation alert.
+
+## How it works
+
+```text
+Cloudflare Worker (trigger/, every 5 minutes)
+  -> GitHub Actions (workflow_dispatch)
+     -> watch.py
+        -> Discord
+        -> state.json (delivery history and health status)
 ```
-Cloudflare Worker (trigger/)  ทุก 5 นาที
-  └─ สั่ง workflow_dispatch ─▶ GitHub Actions รัน watch.py ─▶ Discord
-                                   └─ บันทึกรายการที่แจ้งแล้วใน state.json
-```
 
-cron ของ GitHub เองยังเปิดไว้เป็นสำรอง แต่ GitHub รันให้แค่ทุกไม่กี่ชั่วโมง
+The [watch workflow](.github/workflows/watch.yml) also has a GitHub Actions schedule as a fallback. Scheduled runs can be delayed, so the five-minute interval is a target, not a delivery guarantee.
 
-## Secrets
+The workflow commits `state.json` back to `main` to track delivered alerts across runs. On a first run without state, the watcher records existing matches and sends a startup notice instead of posting the backlog.
 
-| อยู่ที่ | ชื่อ | ใช้ทำอะไร |
-|---|---|---|
-| GitHub repo secret | `DISCORD_WEBHOOK` | webhook ของ channel ที่จะรับข่าว (จำเป็น) |
-| GitHub repo secret | `NVD_API_KEY` | ไม่บังคับ ช่วยกันโดน NVD จำกัดการเรียก [ขอฟรี](https://nvd.nist.gov/developers/request-an-api-key) |
-| Cloudflare Worker secret | `GITHUB_TOKEN` | fine-grained token เฉพาะ repo นี้ สิทธิ์ Actions: Read and write |
+## Quick start
 
-## เปลี่ยน token
+### Requirements
 
-ทำเมื่อ Discord แจ้ง "ตัวสั่งรันทุก 5 นาทีหยุดทำงาน" หรือก่อน token หมดอายุ (ดูวันหมดอายุที่ [Personal access tokens](https://github.com/settings/personal-access-tokens))
+- Python 3.11 or later for the watcher; it uses only the Python standard library.
+- A Discord channel webhook and a GitHub repository with Actions enabled.
+- [GitHub CLI](https://cli.github.com/) authenticated with access to the repository.
+- A Cloudflare account and Node.js/npm for the trigger. CI uses Node.js 24.
 
-1. [สร้าง token ใหม่](https://github.com/settings/personal-access-tokens/new): Repository access เลือก **Only select repositories** แล้วเลือก `security-alert` และ Permissions ให้ **Actions: Read and write**
-2. ใส่ token ให้ Worker (ระบบจะให้วางแบบซ่อนตัวอักษร):
+The commands below target `NiraphatK/security-alert`. For a fork, replace the repository in CLI commands and the dispatch URL in [trigger/src/index.ts](trigger/src/index.ts). Review the existing `state.json` before choosing whether to retain its delivery history.
+
+### Run locally
+
+Clone the repository and run the offline watcher tests:
 
 ```bash
-cd trigger && npx cf auth login && read -s "T?GitHub token: " && npx cf workers secrets update GITHUB_TOKEN --worker security-alert-trigger --text "$T"; unset T
+git clone https://github.com/NiraphatK/security-alert.git
+cd security-alert
+python3 -B test_watch.py
 ```
 
-## เปลี่ยน Discord webhook
+Preview live data locally without sending Discord messages:
+
+```bash
+env -u DISCORD_WEBHOOK PREVIEW=true python3 watch.py
+```
+
+Without `DISCORD_WEBHOOK`, messages are printed to stdout and state is not saved. Live previews require network access.
+
+### Send a Discord preview
+
+Set the repository's Discord webhook using the interactive prompt:
 
 ```bash
 gh secret set DISCORD_WEBHOOK -R NiraphatK/security-alert
 ```
 
-## ดูตัวอย่างข้อความ
+Optionally, [request an NVD API key](https://nvd.nist.gov/developers/request-an-api-key) for a higher request allowance, then store it:
 
-ส่งข่าวจริงของสัปดาห์นี้แบบละ 1 ข้อความเข้า Discord โดยไม่กระทบ state:
+```bash
+gh secret set NVD_API_KEY -R NiraphatK/security-alert
+```
+
+Dispatch a preview:
 
 ```bash
 gh workflow run watch.yml -R NiraphatK/security-alert -f preview=true
 ```
 
-## ข้อความเกี่ยวกับตัวเฝ้าเอง
+This sends samples from live source data to the configured Discord channel, suppresses mentions, and leaves `state.json` unchanged. Check the [Actions runs](https://github.com/NiraphatK/security-alert/actions/workflows/watch.yml) for errors.
 
-| ข้อความ | ความหมาย |
-|---|---|
-| สรุป 24 ชั่วโมงที่ผ่านมา (09:00 ทุกวัน) | ยังทำงานอยู่ ถ้าวันไหนไม่มา แปลว่าตัวเฝ้าหยุดทำงาน ถ้าเป็นสีเหลือง แปลว่ารอบตรวจน้อยผิดปกติ |
-| ดึงข่าวจาก ... ไม่ได้ / กลับมาใช้ได้แล้ว | แหล่งข่าวล่มติดกันประมาณ 30 นาที แหล่งอื่นยังทำงาน |
-| ตัวสั่งรันทุก 5 นาทีหยุดทำงาน / กลับมาทำงานแล้ว | Worker ไม่ได้สั่งรันเกิน 20 นาที ส่วนใหญ่เพราะ token หมดอายุ ดูหัวข้อเปลี่ยน token |
-| ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว / กลับมาทำงานปกติแล้ว | workflow พัง กดหัวข้อเพื่อดู log (แจ้งครั้งเดียวจนกว่าจะกลับมา) |
+## Secrets reference
 
-## ปรับความดัง
+| Location | Name | Purpose |
+| --- | --- | --- |
+| GitHub repository secret | `DISCORD_WEBHOOK` | Required for Discord delivery. |
+| GitHub repository secret | `NVD_API_KEY` | Optional; increases the NVD API request allowance. |
+| Cloudflare Worker secret | `GITHUB_TOKEN` | Fine-grained token used to dispatch the workflow; requires **Actions: Read and write** on this repository. |
+| GitHub Actions | `GITHUB_TOKEN` | Supplied automatically by GitHub. The workflow grants `contents: write` to save state and `actions: read` for health checks. |
 
-ค่าบนสุดของ [watch.py](watch.py): `GHSA_SEVERITIES` (เพิ่ม `"high"` ถ้าอยากได้มากขึ้น), `NVD_MIN_SCORE`, `MUTE_WORDS`, `MUTE_CNAS`
+Keep webhook URLs and tokens in their respective secret stores. Do not commit them to the repository.
 
-## พัฒนา
+## Operations and troubleshooting
+
+### Rotate the GitHub token
+
+Rotate the Worker's token before it expires, or when Discord reports that the five-minute trigger has stopped. Check its expiration under [Personal access tokens](https://github.com/settings/personal-access-tokens).
+
+1. Create a replacement fine-grained token with access only to this repository and **Actions: Read and write** permission.
+2. From `trigger/`, authenticate with `npx cf auth login`.
+3. In a **Bash** shell, run the following commands. The prompt hides your input:
 
 ```bash
-python3 -B test_watch.py
+read -r -s -p "GitHub token: " trigger_token
+printf '\n'
+npx cf workers secrets update GITHUB_TOKEN --worker security-alert-trigger --text "$trigger_token"
+unset trigger_token
 ```
+
+Verify that new workflow runs appear after the update. Cloudflare Workers Logs record dispatch errors, including GitHub authorization failures.
+
+### Replace the Discord webhook
+
+Run the following command and paste the replacement webhook at the prompt:
 
 ```bash
-PREVIEW=true python3 watch.py
+gh secret set DISCORD_WEBHOOK -R NiraphatK/security-alert
 ```
 
-ถ้าไม่ได้ตั้ง `DISCORD_WEBHOOK` คำสั่งข้างบนจะพิมพ์ข้อความออกจอแทนการส่ง ส่วน Worker ใน `trigger/` deploy ด้วย `npx cf deploy` หลัง `npx cf auth login` และทุก push จะรันเทสต์ใน [test.yml](.github/workflows/test.yml)
+### Understand health notifications
+
+Notification descriptions below are English summaries of the Thai messages sent to Discord.
+
+| Notification | Meaning and next step |
+| --- | --- |
+| Daily summary | Sent on the first run at or after 09:00 Asia/Bangkok (02:00 UTC) each day, after initial setup. A missing summary can indicate that the watcher has stopped. Yellow means fewer than 144 runs were recorded in the past 24 hours; the expected five-minute cadence is about 288. |
+| Source unavailable / recovered | A source failed for six consecutive runs, approximately 30 minutes at the expected cadence. Other sources continue running. |
+| Five-minute trigger stopped / recovered | A fallback run detected no dispatch within the last 20 minutes. Check Cloudflare Workers Logs and the Worker's token expiration and permissions. |
+| Watcher failed / recovered | The workflow failed. Open the notification's linked Actions run to inspect the logs. Repeated failures are suppressed until recovery. |
+
+## Customize alert volume
+
+Edit the constants near the top of [watch.py](watch.py):
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `GHSA_SEVERITIES` | `{"critical"}` | Add `"high"` to include high-severity GitHub advisories. |
+| `NVD_MIN_SCORE` | `9.0` | Set the minimum NVD CVSS score. |
+| `MUTE_WORDS` | `("wordpress",)` | Filter NVD descriptions containing these words. |
+| `MUTE_CNAS` | Patchstack and Wordfence identifiers | Filter NVD entries from these assigning authorities. |
+
+NVD filters do not mute KEV alerts.
+
+## Development
+
+Run `python3 -B test_watch.py` from the repository root for offline watcher tests. Use the [local preview](#run-locally) to inspect live data. If you set `DISCORD_WEBHOOK` when running a local preview, it sends samples to Discord.
+
+To check the Cloudflare trigger:
+
+```bash
+cd trigger
+npm ci --ignore-scripts
+npm run typecheck
+npx cf deploy --dry-run
+```
+
+To deploy the trigger from `trigger/`:
+
+```bash
+npx cf auth login
+npx cf deploy
+```
+
+The Worker's `GITHUB_TOKEN` must be configured for dispatches to succeed; see [token rotation](#rotate-the-github-token) for updating an existing Worker. Its name and five-minute schedule are defined in [trigger/cloudflare.config.ts](trigger/cloudflare.config.ts). It has no public HTTP endpoint.
+
+The [test workflow](.github/workflows/test.yml) runs watcher tests, a dependency audit, trigger type checks, and a deployment dry run on pushes and pull requests.
