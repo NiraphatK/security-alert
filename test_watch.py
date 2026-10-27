@@ -93,10 +93,12 @@ def test_ghsa():
     assert [k[0] for k, _ in out] == ["ghsa:GHSA-new", "ghsa:GHSA-late"], out
     keys, e = out[0]
     assert keys == ["ghsa:GHSA-new", "cve:CVE-1"] and "cve:CVE-1" in taken
-    assert e["author"]["name"] == "CRITICAL 9.8 · GitHub Advisory" and e["title"] == "RCE in next"
+    assert e["author"]["name"] == "Open-source critical · GitHub Advisory" and e["title"] == "RCE in next"
     assert e["description"] == r"Crafted \*headers\* reach eval. Full takeover.", e["description"]  # headings dropped
-    assert e["footer"]["text"] == "CVE-1 · GHSA-new"
-    kind, path, nxt, maven, link = e["fields"]  # ranges of one package share a field
+    assert e["footer"]["text"] == "next (npm) และอีก 1 package" and "timestamp" not in e  # footer: what's affected
+    kind, path, nxt, maven, cve, score, published, link = e["fields"]  # ranges of one package share a field
+    assert (cve["value"], score["value"], published["name"]) == ("`CVE-1`", "**9.8**", "เผยแพร่")
+    assert all(f["inline"] for f in (cve, score, published)) and published["value"].endswith(":R>")
     assert kind == {"name": "ประเภทการโจมตี", "value": "**Remote Code Execution**\nรันโค้ดบนเครื่องเป้าหมายได้ = ยึดเครื่องได้", "inline": True}
     assert path == {"name": "ช่องทางโจมตี", "value": "ผ่านอินเทอร์เน็ต\nไม่ต้องล็อกอิน\nเหยื่อไม่ต้องทำอะไร", "inline": True}
     assert nxt["name"] == "วิธีแก้: next (npm)" and nxt["value"].startswith("`>= 15.0.0, < 15.2.3` → อัปเป็น **15.2.3**\n")
@@ -126,7 +128,7 @@ def test_nvd():
     assert out[0][1] == (
         "**[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · CVSS **9.8** · SQL Injection\n"
         "SQL injection in foo before 1.0.8\n"
-        "**ช่องทาง** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร\n"
+        "**ช่องทางโจมตี** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร\n"
         "**วิธีแก้** อัปเดตเป็น 1.0.8 ขึ้นไป · [patch](https://example.com/patch)"), out[0][1]
     assert out[1][1].startswith("**[CVE-2025-2](https://nvd.nist.gov/vuln/detail/CVE-2025-2)** · CVSS **9.3**\n")  # no label
     assert out[1][1].endswith("\n**วิธีแก้** ยังไม่ระบุ ดูรายละเอียดที่ NVD")
@@ -239,7 +241,7 @@ def test_digest_run_count():
     def broken(since):
         raise OSError("api down")
     quiet = watch.digest(fresh(), NOW, broken)[0]  # no count, but the heartbeat still goes out
-    assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == ["ถูกโจมตีจริง", "Open-source", "CVE ใหม่"]
+    assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == [watch.EXPLOITED, watch.OPEN_SOURCE, watch.NEW_CVE]
 
 
 def test_trigger_check():
@@ -333,7 +335,23 @@ def test_ghsa_many_packages():
     a["vulnerabilities"] = [{"package": {"ecosystem": "npm", "name": f"p{i}"}, "vulnerable_version_range": "< 1.0.0",
                              "first_patched_version": "1.0.0"} for i in range(8)]
     fields = watch.match_ghsa([a], set(), CUT)[0][1]["fields"]
-    assert [f["name"] for f in fields].count("package อื่น") == 1 and fields[-2]["value"].startswith("และอีก 3 package")
+    more = [f for f in fields if f["name"] == "package อื่น"]
+    assert len(more) == 1 and more[0]["value"].startswith("และอีก 3 package")
+    assert [f["name"] for f in fields][-4:] == ["CVE", "CVSS", "เผยแพร่", "ลิงก์"]  # same closing row as every card
+
+
+def test_cards_share_one_layout():
+    """KEV and GitHub cards: type and path first, then the fix, then CVE · CVSS · date, then links."""
+    kev_card = watch.match_kev([kev("CVE-a")], set(), CUT, {"CVE-a": nvd("CVE-a")}.get)[0][1]
+    gh_card = watch.match_ghsa([ghsa("GHSA-x", cve="CVE-b")], set(), CUT)[0][1]
+    shape = lambda e: [("วิธีแก้" if f["name"].startswith("วิธีแก้") else f["name"]) for f in e["fields"]]
+    collapse = lambda names: [n for i, n in enumerate(names) if i == 0 or n != names[i - 1]]  # one fix block
+    assert collapse(shape(kev_card))[:3] == collapse(shape(gh_card))[:3] == ["ประเภทการโจมตี", "ช่องทางโจมตี", "วิธีแก้"]
+    assert shape(kev_card)[-4:-1] == ["CVE", "CVSS", "ต้องแพตช์ภายใน"] and shape(gh_card)[-4:-1] == ["CVE", "CVSS", "เผยแพร่"]
+    assert shape(kev_card)[-1] == shape(gh_card)[-1] == "ลิงก์"
+    assert kev_card["author"]["name"].endswith(f"{watch.EXPLOITED} · CISA KEV")
+    assert gh_card["author"]["name"] == f"{watch.OPEN_SOURCE} · GitHub Advisory"
+    assert watch.nvd_feed([(["nvd:x"], "entry")])[0][1]["author"]["name"] == f"{watch.NEW_CVE} · NVD"
 
 
 if __name__ == "__main__":
