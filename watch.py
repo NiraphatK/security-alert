@@ -364,11 +364,11 @@ def nvd_fix(desc, patch):
     if versions:
         text = f"อัปเดตเป็น {' / '.join(versions)} ขึ้นไป" + (" (ตามสายเวอร์ชันที่ใช้)" if len(versions) > 1 else "")
         return text + (f" · [patch]({patch})" if patch else "")
-    return f"[ติดตั้ง patch ของ vendor]({patch})" if patch else "ยังไม่ระบุ ดูรายละเอียดที่ NVD"
+    return f"[ติดตั้ง patch ของ vendor]({patch})" if patch else "ยังไม่พบวิธีแก้ในข้อมูลนี้ ตรวจสอบประกาศผู้ผลิตจากหน้า NVD"
 
 
 def match_nvd(cves, taken, cutoff):
-    """NVD runs ~25-50 criticals a weekday, so each is a few-line entry (packed by `nvd_feed`), not a card."""
+    """NVD entries explain the impact, attack conditions and fix; `nvd_feed` groups them into small cards."""
     out = []
     for c in cves:
         keys = [f"nvd:{c['id']}", f"cve:{c['id']}"]
@@ -380,22 +380,20 @@ def match_nvd(cves, taken, cutoff):
             continue
         taken.update(keys)
         cwes = nvd_cwes(c)
-        kind = classify(cwes, desc)
-        label = kind[0] if kind else (f"[{cwes[0]}]({cwe_url(cwes[0])})" if cwes else "")
+        kind = attack_type(cwes, desc) or "ยังไม่ระบุประเภท"
         patch = next((r["url"] for r in c.get("references", []) if FIX_TAGS & set(r.get("tags", []))), None)
-        lines = [f"**[{c['id']}]({nvd_url(c['id'])})** · CVSS **{score}**" + (f" · {label}" if label else ""),
-                 cut(md(desc), 140)]
-        if path := attack_path(vector):
-            lines.append(f"**ช่องทางโจมตี** {' · '.join(path)}")
-        lines.append(f"**วิธีแก้** {nvd_fix(desc, patch)}")
-        out.append((score, keys, "\n".join(lines)))
+        path = "\n".join(f"• {p}" for p in attack_path(vector)) or "ยังไม่ระบุเงื่อนไขการโจมตี"
+        lines = [f"**[{c['id']}]({nvd_url(c['id'])})** · CVSS **{score}/10**\n{cut(md(desc), 220)}",
+                 f"**ประเภทการโจมตี**\n{kind}", f"**ช่องทางโจมตี**\n{path}",
+                 f"**วิธีแก้**\n{nvd_fix(desc, patch)}"]
+        out.append((score, keys, "\n\n".join(lines)))
     return [(keys, entry) for _, keys, entry in sorted(out, key=lambda x: -x[0])]  # worst first
 
 
 def nvd_feed(entries):
     out, keys, batch = [], [], []
     for k, entry in entries:
-        if batch and len("\n\n".join(batch + [entry])) > 3900:
+        if batch and (len(batch) == 3 or len("\n\n---\n\n".join(batch + [entry])) > 3900):
             out.append((keys, batch))
             keys, batch = [], []
         keys, batch = keys + k, batch + [entry]
@@ -403,8 +401,8 @@ def nvd_feed(entries):
         out.append((keys, batch))
     return [(k, {
         "author": {"name": f"{NEW_CVE} · NVD"},
-        "title": f"{len(b)} รายการ · CVSS ≥ {NVD_MIN_SCORE}",
-        "description": "\n\n".join(b),
+        "title": f"ช่องโหว่ร้ายแรง {len(b)} รายการ · CVSS ≥ {NVD_MIN_SCORE}",
+        "description": "\n\n---\n\n".join(b),
         "color": ORANGE,
         "footer": {"text": "กดเลข CVE เพื่อดูรายละเอียดเต็ม"},
     }) for k, b in out]

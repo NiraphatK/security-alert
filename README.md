@@ -12,7 +12,7 @@ A Cloudflare Worker requests a GitHub Actions run every five minutes. Discord no
 | Critical open-source vulnerabilities | [GitHub Security Advisories](https://github.com/advisories) | Report reviewed critical advisories, including affected versions, patched versions, and upgrade commands where available. |
 | New critical CVEs | [NVD](https://nvd.nist.gov) | Report recent CVEs with CVSS scores of at least 9.0, across vendors. WordPress-related descriptions and selected WordPress plugin CNAs are filtered by default. |
 
-NVD entries are grouped into compact messages. CVEs already covered by GitHub advisories are skipped in the NVD feed; a later KEV listing still generates an exploitation alert.
+NVD messages contain up to three CVEs per card, with separate sections for the attack type and its impact in Thai, attack conditions, and remediation. Missing details are marked explicitly. CVEs already covered by GitHub advisories are skipped in the NVD feed; a later KEV listing still generates an exploitation alert.
 
 ## How it works
 

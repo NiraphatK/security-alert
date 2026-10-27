@@ -126,16 +126,31 @@ def test_nvd():
     ], taken, NOW - watch.NVD_LOOKBACK)
     assert [k[0] for k, _ in out] == ["nvd:CVE-2026-1", "nvd:CVE-2025-2"], out  # sorted worst first
     assert out[0][1] == (
-        "**[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · CVSS **9.8** · SQL Injection\n"
-        "SQL injection in foo before 1.0.8\n"
-        "**ช่องทางโจมตี** ผ่านอินเทอร์เน็ต · ไม่ต้องล็อกอิน · เหยื่อไม่ต้องทำอะไร\n"
-        "**วิธีแก้** อัปเดตเป็น 1.0.8 ขึ้นไป · [patch](https://example.com/patch)"), out[0][1]
-    assert out[1][1].startswith("**[CVE-2025-2](https://nvd.nist.gov/vuln/detail/CVE-2025-2)** · CVSS **9.3**\n")  # no label
-    assert out[1][1].endswith("\n**วิธีแก้** ยังไม่ระบุ ดูรายละเอียดที่ NVD")
+        "**[CVE-2026-1](https://nvd.nist.gov/vuln/detail/CVE-2026-1)** · CVSS **9.8/10**\n"
+        "SQL injection in foo before 1.0.8\n\n"
+        "**ประเภทการโจมตี**\n**SQL Injection**\nอ่าน แก้ หรือลบข้อมูลในฐานข้อมูลได้\n\n"
+        "**ช่องทางโจมตี**\n• ผ่านอินเทอร์เน็ต\n• ไม่ต้องล็อกอิน\n• เหยื่อไม่ต้องทำอะไร\n\n"
+        "**วิธีแก้**\nอัปเดตเป็น 1.0.8 ขึ้นไป · [patch](https://example.com/patch)"), out[0][1]
+    assert "**ประเภทการโจมตี**\nยังไม่ระบุประเภท" in out[1][1]
+    assert out[1][1].endswith("\n**วิธีแก้**\nยังไม่พบวิธีแก้ในข้อมูลนี้ ตรวจสอบประกาศผู้ผลิตจากหน้า NVD")
     feed = watch.nvd_feed(out * 40)
     assert len(feed) > 1 and all(len(e["description"]) <= 4096 for _, e in feed)
     assert sum(len(k) for k, _ in feed) == 2 * 2 * 40  # every CVE's keys land in some message
-    assert feed[0][1]["title"] == f"{feed[0][1]['description'].count('**[')} รายการ · CVSS ≥ 9.0"
+    assert all(e["description"].count("**[CVE-") <= 3 for _, e in feed)
+    assert feed[0][1]["title"] == "ช่องโหว่ร้ายแรง 3 รายการ · CVSS ≥ 9.0"
+
+
+def test_nvd_missing_details_and_message_limits():
+    record = nvd("CVE-2026-11", vector="", cwes=("CWE-1284",), desc="Unknown issue " + "x" * 400)
+    entry = watch.match_nvd([record], set(), NOW - watch.NVD_LOOKBACK)[0][1]
+    assert "[CWE-1284](https://cwe.mitre.org/data/definitions/1284.html)" in entry
+    assert "**ช่องทางโจมตี**\nยังไม่ระบุเงื่อนไขการโจมตี" in entry
+    assert "ไม่ต้องล็อกอิน" not in entry and "x" * 221 not in entry
+    entries = [([f"nvd:{i}"], "x" * 1400) for i in range(5)]
+    feed = watch.nvd_feed(entries)
+    assert [keys for keys, _ in feed] == [["nvd:0", "nvd:1"], ["nvd:2", "nvd:3"], ["nvd:4"]]
+    assert all(len(e["description"]) <= 4096 for _, e in feed)
+    assert watch.nvd_feed([]) == []
 
 
 def test_nvd_fix():
