@@ -4,6 +4,7 @@ Sources, most urgent first:
   CISA KEV         exploited in the wild (pings @here)
   GitHub Advisory  critical open-source package vulns, with patched versions
   NVD              any new CVE scored >= 9.0, usually before it reaches KEV
+  Security news    malware, supply-chain attacks, breaches and flaws, even without a CVE
 
 Env: DISCORD_WEBHOOK (unset = dry run: print, keep no state), GITHUB_TOKEN, NVD_API_KEY (optional),
      PREVIEW=true (post one sample of each message type, touch no state).
@@ -18,8 +19,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 GHSA_SEVERITIES = {"critical"}
@@ -31,6 +35,7 @@ MUTE_CNAS = {"audit@patchstack.com", "security@wordfence.com"}  # WordPress-plug
 KEV_LOOKBACK = timedelta(days=7)  # the feed is small, and an exploited-in-the-wild alert must never be lost
 GHSA_LOOKBACK = timedelta(days=3)
 NVD_LOOKBACK = timedelta(hours=72)  # also: many CVEs get their score a day or two after publishing
+NEWS_LOOKBACK = timedelta(hours=24)
 KEEP_SEEN = timedelta(days=30)
 FAIL_ALERT_AFTER = 6  # consecutive failed runs (~30 min at */5) before saying a source is down
 DIGEST_HOUR_UTC = 2  # 09:00 Asia/Bangkok
@@ -44,13 +49,24 @@ README = "https://github.com/NiraphatK/security-alert#readme"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 GHSA_URL = "https://api.github.com/advisories?type=reviewed&sort=updated&direction=desc&per_page=100"
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NEWS_FEEDS = {
+    "OpenSourceMalware": "https://opensourcemalware.com/rss.xml",
+    "BleepingComputer": "https://www.bleepingcomputer.com/feed/",
+    "The Hacker News": "https://feeds.feedburner.com/TheHackersNews",
+    "SecurityWeek": "https://www.securityweek.com/feed/",
+}
+NEWS_TERMS = re.compile(r"\b(?:malware|ransomware|backdoors?|trojans?|trojani[sz]ed|compromis(?:e[sd]?|ing)|breach(?:es)?|"
+                        r"vulnerab\w*|flaws?|exploits?|exploited|exploitation|zero[- ]days?|supply[- ]chain|"
+                        r"phishing|infostealers?|credential\w*|token theft|stolen tokens?|data leaks?|"
+                        r"hack(?:s|ed|ers|ing)?|hijack\w*|patch(?:es|ed)?|leak(?:s|ed|ing)?|expos(?:e[sd]?|ure)|"
+                        r"attack(?:s|ers)?|CVE-\d{4}-\d+)\b", re.I)
+NEWS_PROMO = re.compile(r"^(?:\[sponsored\]|(?:sponsored|advertorial|webinar|deal|sale)\s*[:—–-])", re.I)
+NEWS_PROMO_CATEGORIES = {"sponsored", "sponsored content", "advertorial", "webinar", "webinars", "deals", "promotions"}
 FIX_TAGS = {"Patch", "Vendor Advisory", "Mitigation", "Release Notes"}
 FIX_CMD = {
     "npm": "npm i {n}@{v}",
     "pip": 'pip install -U "{n}>={v}"',
     "go": "go get {n}@v{v}",
-    "rust": "cargo update -p {n}",
-    "rubygems": "bundle update {n}",
     "composer": "composer require {n}:^{v}",
 }
 ECOSYSTEMS = {"npm": "npm", "pip": "PyPI", "rust": "Rust", "go": "Go", "maven": "Maven", "composer": "PHP",
@@ -58,6 +74,7 @@ ECOSYSTEMS = {"npm": "npm", "pip": "PyPI", "rust": "Rust", "go": "Go", "maven": 
 RED, ORANGE, PURPLE, GREEN, YELLOW = 0xE5484D, 0xF76B15, 0x8E4EC6, 0x30A46C, 0xFFC53D
 # One name per kind of alert, used on its cards, in the daily summary and in the start notice
 EXPLOITED, OPEN_SOURCE, NEW_CVE = "ถูกโจมตีจริง", "Open-source critical", "CVE ร้ายแรงใหม่"
+SECURITY_NEWS = "ข่าวความปลอดภัย Tech"
 
 # (CWEs, fallback keywords, attack name, what the attacker gets). A record's own CWE order wins (its first is
 # usually the primary); the keywords are only tried against the text when none of its CWEs is listed here.
@@ -121,15 +138,15 @@ def md(s):
     return re.sub(r"([\\*_~`|\[\]()<>#])", r"\\\1", " ".join((s or "").split()))
 
 
-def fetch(url, headers=None, tries=3, timeout=30):
+def fetch(url, headers=None, tries=3, timeout=30, decode=json.loads):
     # gzip: the KEV and NVD feeds are ~1.8 MB each per run, ~10x smaller compressed
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip", **(headers or {})})
     for attempt in range(tries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 body = r.read()
-                return json.loads(gzip.decompress(body) if r.headers.get("Content-Encoding") == "gzip" else body), r.headers
-        except (OSError, ValueError, http.client.HTTPException):
+                return decode(gzip.decompress(body) if r.headers.get("Content-Encoding") == "gzip" else body), r.headers
+        except (OSError, ValueError, http.client.HTTPException, ET.ParseError):
             if attempt == tries - 1:
                 raise
             time.sleep(5 * (attempt + 1))
@@ -209,6 +226,104 @@ def nvd_lookup():
 
 def get_kev():
     return fetch(KEV_URL)[0]["vulnerabilities"]
+
+
+class FeedText(HTMLParser):
+    """Render feed HTML as plain text; scripts/styles are not article summaries."""
+    def __init__(self, text):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.hidden = [], 0
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        if tag.rsplit(":", 1)[-1] in {"script", "style"}:
+            self.hidden += 1
+        self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag.rsplit(":", 1)[-1] in {"script", "style"}:
+            self.hidden = max(0, self.hidden - 1)
+        self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def plain_text(text):
+    return " ".join("".join(FeedText(text or "").parts).split())
+
+
+def parse_news(root):
+    atom = "{http://www.w3.org/2005/Atom}"
+    if root.tag not in {"rss", atom + "feed"}:
+        raise ValueError("Expected an RSS or Atom feed")
+    prefix = atom if root.tag == atom + "feed" else ""
+    articles = []
+    for item in root.findall(atom + "entry" if prefix else "./channel/item"):
+        def text(name):
+            node = item.find(prefix + name)
+            if node is None:
+                return ""
+            value = (node.text or "") + "".join(ET.tostring(c, encoding="unicode") for c in node)
+            if (prefix and node.get("type") in {"html", "xhtml"}) or (not prefix and name == "description"):
+                return plain_text(value)
+            return " ".join(value.split())
+
+        date = (text("published") or text("updated")) if prefix else text("pubDate")
+        try:
+            published = ts(date) if prefix else parsedate_to_datetime(date)
+        except (ValueError, TypeError, OverflowError):
+            continue  # a malformed item must not hide the rest of a healthy feed
+        url = next((n.get("href", "") for n in item.findall(atom + "link") if n.get("rel", "alternate") == "alternate"), "") if prefix else text("link")
+        articles.append({"title": text("title"), "url": url.strip(),
+                         "published": published if published.tzinfo else published.replace(tzinfo=UTC),
+                         "description": (text("summary") or text("content")) if prefix else text("description"),
+                         "categories": [(n.get("term", "") if prefix else n.text or "").strip() for n in item.findall(prefix + "category")]})
+    return articles
+
+
+def get_news(url):
+    root, _ = fetch(url, tries=2, timeout=15, decode=ET.fromstring)
+    return parse_news(root)
+
+
+def news_url(url):
+    """Keep article identity parameters, remove tracking and make links safe in Discord Markdown."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme not in {"http", "https"} or not u.hostname or u.username or u.password or any(c.isspace() for c in url):
+            return None
+        query = urllib.parse.urlencode([(k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+                                       if not k.lower().startswith("utm_") and k.lower() not in {"fbclid", "gclid"}])
+        url = urllib.parse.urlunsplit((u.scheme, u.netloc.lower(), u.path.rstrip("/") or "/", query, ""))
+        return urllib.parse.quote(url, safe=":/?&=%@+;,-._~")
+    except ValueError:
+        return None
+
+
+def match_news(articles, taken, cutoff, source):
+    out = []
+    for a in articles:
+        title, body = a["title"], a["description"]
+        categories = {c.lower() for c in a["categories"]}
+        url = news_url(a["url"])
+        if (not title or not url or a["published"] < cutoff or NEWS_PROMO.search(title)
+                or NEWS_PROMO_CATEGORIES & categories or not NEWS_TERMS.search(f"{title} {body}")):
+            continue
+        key = f"news:{url}"
+        if key in taken:
+            continue
+        # shortcut: dedupe article URLs, not incidents; add event grouping only if cross-publisher repeats become noisy.
+        taken.add(key)  # never mark cve: keys: later official/exploitation alerts must still go out
+        out.append(([key], {
+            "author": {"name": f"{SECURITY_NEWS} · {source}"}, "title": cut(md(title), 256),
+            "url": url, "description": cut(md(body), 900) or "ดูรายละเอียดจากรายงานต้นทาง", "color": ORANGE,
+            "fields": [{"name": "เผยแพร่", "value": when(a["published"]), "inline": True},
+                       links(("อ่านรายงานต้นทาง", url))],
+            "footer": {"text": "ข่าวจากผู้เผยแพร่ · ไม่จำเป็นต้องมี CVE/CVSS · ตรวจสอบรายละเอียดและวิธีแก้จากต้นทาง"},
+        }))
+    return out
 
 
 # --- summary helpers: attack type, attack path and fix, in Thai, derived from the feeds' own data ---------
@@ -302,10 +417,18 @@ def package_field(eco, name, ranges):
     lines = [f"`{r or '?'}` → " + (f"อัปเป็น **{f}**" if f else "ยังไม่มี patch") for r, f in ranges]
     cmds = list(dict.fromkeys(c for _, f in ranges if f and (c := fix_cmd(eco, name, f))))
     if cmds:
-        lines.append(f"```sh\n{chr(10).join(cmds)}\n```")
+        if len(cmds) > 1:
+            lines.append("เลือกเพียงคำสั่งเดียวให้ตรงกับช่วงเวอร์ชันที่ใช้อยู่")
+        lines.extend(f"```sh\n{cmd}\n```" for cmd in cmds)
+    elif eco in {"rust", "rubygems"} and any(f for _, f in ranges):
+        manifest = "Cargo.toml" if eco == "rust" else "Gemfile"
+        lines.append(f"ปรับ {manifest} ให้ใช้รุ่นที่แพตช์แล้วตามช่วงเวอร์ชันด้านบน แล้วอัปเดต lockfile")
     elif not any(f for _, f in ranges):
         lines.append("ระหว่างนี้ให้หยุดใช้หรือจำกัดการใช้งาน แล้วติดตาม advisory")
-    return {"name": cut(f"วิธีแก้: {name} ({ECOSYSTEMS.get(eco, eco)})", 256), "value": cut("\n".join(lines), 1024)}
+    value = "\n".join(lines)
+    if len(value) > 1024:  # never offer a copyable command cut off at Discord's field limit
+        value = cut("\n".join(lines[:len(ranges)]), 940) + "\nดูรายละเอียดและคำสั่งอัปเกรดทั้งหมดใน advisory"
+    return {"name": cut(f"วิธีแก้: {name} ({ECOSYSTEMS.get(eco, eco)})", 256), "value": value}
 
 
 def match_ghsa(advisories, taken, cutoff):
@@ -485,6 +608,7 @@ def digest(state, now, runs=lambda since: None):
             {"name": EXPLOITED, "value": f"**{n['kev']}**", "inline": True},
             {"name": OPEN_SOURCE, "value": f"**{n['ghsa']}**", "inline": True},
             {"name": NEW_CVE, "value": f"**{n['nvd']}**", "inline": True},
+            {"name": SECURITY_NEWS, "value": f"**{n['news']}**", "inline": True},
         ] + ([{"name": "รอบตรวจ", "value": f"**{count}** รอบ", "inline": True}] if count is not None else []),
         "footer": {"text": "ถ้าวันไหนไม่มีข้อความนี้ แปลว่าตัวเฝ้าหยุดทำงาน"},
     }
@@ -565,14 +689,20 @@ def batches(alerts):
 
 
 def post(payload):
-    """Send one message, retrying rate limits, Discord-side errors and timeouts. Raises Rejected on a 4xx."""
+    """Wait for a confirmed Discord message; retry transient failures. Raises Rejected on a 4xx."""
     if not HOOK:
         print(json.dumps(payload, ensure_ascii=False, indent=1))
         return
-    req = urllib.request.Request(HOOK, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "User-Agent": UA})
+    url = urllib.parse.urlsplit(HOOK)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True) if k != "wait"]
+    url = urllib.parse.urlunsplit(url._replace(query=urllib.parse.urlencode(query + [("wait", "true")])))
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "User-Agent": UA})
     for attempt in range(5):
         try:
-            urllib.request.urlopen(req, timeout=30).close()
+            with urllib.request.urlopen(req, timeout=30) as response:
+                message = json.load(response)
+                if not isinstance(message, dict) or not message.get("id"):
+                    raise ValueError("Discord did not confirm a message ID")
             return
         except urllib.error.HTTPError as e:
             body = e.read()
@@ -584,10 +714,10 @@ def post(payload):
                 continue
             if e.code < 500:
                 raise Rejected(f"Discord {e.code}: {body[:500].decode(errors='replace')}") from None
-        except (OSError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         time.sleep(5 * (attempt + 1))
-    raise RuntimeError("Discord unreachable after 5 tries")
+    raise RuntimeError("Discord did not confirm delivery after 5 tries")
 
 
 def save(state):
@@ -597,8 +727,8 @@ def save(state):
 
 def send(alerts, state, now, ping=False):
     """Post alerts, marking each seen once Discord has it. A message Discord rejects is retried one alert at a
-    time, and an alert it still rejects goes out as a bare link to its source and is marked seen, so one bad
-    alert can't hold back the rest run after run. Returns the rejections, for the log."""
+    time, then as a bare link. Failed fallbacks remain unseen for a later run; other alerts still go out.
+    Returns the rejections, for the log."""
     def message(embeds):
         return {"content": "@here" if ping else "", "embeds": embeds,
                 "allowed_mentions": {"parse": ["everyone"] if ping else []}}  # feed text must never ping anyone
@@ -618,8 +748,9 @@ def send(alerts, state, now, ping=False):
                     "description": "ข้อความเต็มส่งไม่ได้ (Discord ปฏิเสธ)\nกดหัวข้อเพื่อดูรายละเอียดที่ต้นทาง"}
             try:
                 post(message([{k: v for k, v in bare.items() if v}]))
-            except Rejected:
-                pass
+            except Rejected as fallback:
+                rejected[-1] += f"; fallback: {fallback}"
+                continue
         for keys, _ in batch:
             state["seen"].update(dict.fromkeys(keys, now.isoformat(timespec="seconds")))
         save(state)  # after every message, so a crash mid-run neither repeats nor loses alerts
@@ -635,33 +766,36 @@ def main():
         ("CISA KEV", kev, lambda: match_kev(get_kev(), taken, now - KEV_LOOKBACK, nvd_lookup())),
         ("GitHub Advisory", news, lambda: match_ghsa(get_ghsa(now - GHSA_LOOKBACK), taken, now - GHSA_LOOKBACK)),
         ("NVD", news, lambda: nvd_feed(match_nvd(get_nvd(now), taken, now - NVD_LOOKBACK))),
-    ]
-    for name, bucket, run in sources:
-        try:
-            bucket += run()
-            err = None
-        except Exception as e:  # one dead source must not silence the others
-            print(f"{name}: {e!r}", file=sys.stderr)
-            errors.append(name)
-            err = e
-        if notice := health(state["fail"], name, err):
-            notices.append(notice)
-
-    if first and HOOK:  # seed quietly instead of flooding the channel with the past days
-        backdated = (now - timedelta(days=1)).isoformat(timespec="seconds")  # keeps them out of the first digest
-        for keys, _ in news + kev:
-            state["seen"].update(dict.fromkeys(keys, backdated))
-        notices.append(({
-            "title": "เริ่มเฝ้าระวังแล้ว", "color": GREEN,
-            "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ\nจากนี้แจ้งทันทีที่มีของใหม่\n\n"
-                           f"- **{EXPLOITED}** แจ้งพร้อม @here\n- **{OPEN_SOURCE}** พร้อมคำสั่งอัปเกรด\n- **{NEW_CVE}** ทุก vendor",
-        }, lambda: None))
-        news, kev = [], []
-
-    prune(state["seen"], now)
+    ] + [(name, news, lambda name=name, url=url: match_news(get_news(url), taken, now - NEWS_LOOKBACK, name))
+         for name, url in NEWS_FEEDS.items()]
     rejected = []
     try:
-        rejected += send(kev, state, now, ping=True)
+        for name, bucket, run in sources:
+            try:
+                bucket += run()
+                err = None
+            except Exception as e:  # one dead source must not silence the others
+                print(f"{name}: {e!r}", file=sys.stderr)
+                errors.append(name)
+                err = e
+            if notice := health(state["fail"], name, err):
+                notices.append(notice)
+            if bucket is kev and not (first and HOOK):
+                rejected += send(kev, state, now, ping=True)
+
+        if first and HOOK:  # seed quietly instead of flooding the channel with the past days
+            backdated = (now - timedelta(days=1)).isoformat(timespec="seconds")  # keeps them out of the first digest
+            for keys, _ in news + kev:
+                state["seen"].update(dict.fromkeys(keys, backdated))
+            notices.append(({
+                "title": "เริ่มเฝ้าระวังแล้ว", "color": GREEN,
+                "description": f"ข้ามข่าวเก่า {len(news) + len(kev)} รายการ\nจากนี้แจ้งทันทีที่มีของใหม่\n\n"
+                               f"- **{EXPLOITED}** แจ้งพร้อม @here\n- **{OPEN_SOURCE}** พร้อมคำสั่งอัปเกรด\n- **{NEW_CVE}** ทุก vendor\n"
+                               f"- **{SECURITY_NEWS}** มัลแวร์ supply-chain และข้อมูลรั่ว แม้ไม่มี CVE",
+            }, lambda: None))
+            news, kev = [], []
+
+        prune(state["seen"], now)
         rejected += send(news, state, now)
         for notice in (digest(state, now, count_runs), trigger_check(state, now, os.environ.get("GITHUB_EVENT_NAME"))):
             if notice:
@@ -672,7 +806,7 @@ def main():
                 commit()
     finally:
         save(state)
-    print(f"sent: kev={len(kev)} news={len(news)} notices={len(notices)} failed_sources={errors}")
+    print(f"matched: kev={len(kev)} news={len(news)} notices={len(notices)} rejected={len(rejected)} failed_sources={errors}")
     if rejected:  # fail this one run, so the workflow's failure notice points at a log naming what Discord refused
         sys.exit("Discord rejected:\n" + "\n".join(rejected))
 
@@ -683,6 +817,11 @@ def preview(now):
     latest_kev = max(get_kev(), key=lambda v: v["dateAdded"])
     samples = (match_kev([latest_kev], set(), week, nvd_lookup()) + match_ghsa(get_ghsa(week), set(), week)[:1]
                + nvd_feed(match_nvd(get_nvd(now), set(), now - NVD_LOOKBACK)[:4]))
+    for name, url in NEWS_FEEDS.items():
+        try:
+            samples += match_news(get_news(url), set(), now - NEWS_LOOKBACK, name)[:1]
+        except Exception as e:
+            print(f"{name}: {e!r}", file=sys.stderr)
     samples.append(([], digest({"seen": {}}, now.replace(hour=12))[0]))
     for i, batch in enumerate(batches(samples)):
         post({"content": "ตัวอย่างหน้าตาข้อความ (ข้อมูลจริงจากสัปดาห์นี้)" if i == 0 else "",

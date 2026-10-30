@@ -1,5 +1,6 @@
 """Offline checks for watch.py: python3 test_watch.py"""
 from datetime import UTC, datetime, timedelta
+import xml.etree.ElementTree as ET
 
 import watch
 
@@ -102,7 +103,8 @@ def test_ghsa():
     assert kind == {"name": "ประเภทการโจมตี", "value": "**Remote Code Execution**\nรันโค้ดบนเครื่องเป้าหมายได้ = ยึดเครื่องได้", "inline": True}
     assert path == {"name": "ช่องทางโจมตี", "value": "ผ่านอินเทอร์เน็ต\nไม่ต้องล็อกอิน\nเหยื่อไม่ต้องทำอะไร", "inline": True}
     assert nxt["name"] == "วิธีแก้: next (npm)" and nxt["value"].startswith("`>= 15.0.0, < 15.2.3` → อัปเป็น **15.2.3**\n")
-    assert nxt["value"].endswith("```sh\nnpm i next@15.2.3\nnpm i next@14.2.25\n```"), nxt["value"]
+    assert "เลือกเพียงคำสั่งเดียว" in nxt["value"]
+    assert nxt["value"].endswith("```sh\nnpm i next@15.2.3\n```\n```sh\nnpm i next@14.2.25\n```"), nxt["value"]
     assert maven["name"] == "วิธีแก้: org.x:y (Maven)" and maven["value"] == (
         "`<= 1.0` → ยังไม่มี patch\nระหว่างนี้ให้หยุดใช้หรือจำกัดการใช้งาน แล้วติดตาม advisory")
     assert link["value"] == ("[GitHub Advisory](https://github.com/advisories/GHSA-new) · [NVD](https://nvd.nist.gov/vuln/detail/CVE-1)"
@@ -194,6 +196,32 @@ def test_fix_cmd():
     assert watch.fix_cmd("maven", "org.x:y", "1.1") is None
 
 
+def test_package_upgrade_commands_are_alternatives():
+    import re
+
+    field = watch.package_field("npm", "next", [(">=15, <15.2.3", "15.2.3"), (">=14, <14.2.25", "14.2.25")])
+    commands = re.findall(r"```sh\n(.*?)\n```", field["value"], re.S)
+    assert commands == ["npm i next@15.2.3", "npm i next@14.2.25"]  # each copy button runs only one alternative
+    assert "เลือกเพียงคำสั่งเดียว" in field["value"]
+    assert ">=15, <15.2.3" in field["value"] and ">=14, <14.2.25" in field["value"]
+    same_fix = watch.package_field("npm", "pkg", [("<1", "2.0.1"), (">=2, <2.0.1", "2.0.1")])
+    assert re.findall(r"```sh\n(.*?)\n```", same_fix["value"], re.S) == ["npm i pkg@2.0.1"]
+
+
+def test_manifest_constrained_upgrades_require_manifest_changes():
+    for ecosystem, manifest, unsafe in [("rust", "Cargo.toml", "cargo update"), ("rubygems", "Gemfile", "bundle update")]:
+        field = watch.package_field(ecosystem, "vulnerable-package", [("<2.0.1", "2.0.1")])
+        assert "2.0.1" in field["value"] and manifest in field["value"]
+        assert unsafe not in field["value"] and "```sh" not in field["value"]
+
+
+def test_large_package_fields_never_offer_truncated_commands():
+    ranges = [(f">={i}, <{i}.0.1", f"{i}.0.1") for i in range(1, 6)]
+    field = watch.package_field("npm", "pkg-" + "a" * 180, ranges)
+    assert len(field["value"]) <= 1024
+    assert "```" not in field["value"] and "advisory" in field["value"]
+
+
 def test_batches():
     small = [([str(i)], {"title": "x"}) for i in range(25)]
     assert [len(b) for b in watch.batches(small)] == [10, 10, 5]
@@ -239,7 +267,7 @@ def test_digest_and_prune():
     }}
     assert watch.digest(state, NOW.replace(hour=1)) is None  # before 09:00 Bangkok
     embed, commit = watch.digest(state, NOW)
-    assert [f["value"] for f in embed["fields"]] == ["**1**", "**1**", "**0**"]  # kev, ghsa, nvd
+    assert [f["value"] for f in embed["fields"]] == ["**1**", "**1**", "**0**", "**0**"]  # kev, ghsa, nvd, news
     commit()
     assert watch.digest(state, NOW) is None  # once a day
     watch.prune(state["seen"], NOW)
@@ -256,7 +284,7 @@ def test_digest_run_count():
     def broken(since):
         raise OSError("api down")
     quiet = watch.digest(fresh(), NOW, broken)[0]  # no count, but the heartbeat still goes out
-    assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == [watch.EXPLOITED, watch.OPEN_SOURCE, watch.NEW_CVE]
+    assert quiet["color"] == watch.GREEN and [f["name"] for f in quiet["fields"]] == [watch.EXPLOITED, watch.OPEN_SOURCE, watch.NEW_CVE, watch.SECURITY_NEWS]
 
 
 def test_trigger_check():
@@ -290,7 +318,7 @@ def with_discord(responder, fn):
         code = responder(payload)
         if code == 200:
             sent.append(payload)
-            return io.BytesIO(b"")
+            return io.BytesIO(b'{"id":"123456789"}')
         body = b'{"retry_after": 0}' if code == 429 else b'{"message": "Invalid Form Body"}'
         raise urllib.error.HTTPError(req.full_url, code, "error", {}, io.BytesIO(body))
     watch.HOOK, watch.urllib.request.urlopen, watch.time.sleep, watch.save = "https://discord.invalid/x", urlopen, lambda s: None, lambda s: None
@@ -326,6 +354,64 @@ def test_discord_retries():
         raise AssertionError("gives up after 5 tries")
 
 
+def test_discord_failed_fallback_remains_eligible():
+    state = {"seen": {}}
+    bad = watch.match_news([article()], set(), CUT, "Source")
+    good = (["news:https://example.com/good"], {"title": "Another alert", "url": "https://example.com/good"})
+    reject_bad = lambda p: 400 if any(e.get("url") == "https://example.com/claude-backdoor" for e in p["embeds"]) else 200
+    rejected, sent = with_discord(reject_bad, lambda: watch.send(bad + [good], state, NOW))
+    assert len(rejected) == 1 and len(sent) == 1
+    assert set(state["seen"]) == {"news:https://example.com/good"}  # only the accepted neighbor
+    retry = watch.match_news([article()], set(state["seen"]), CUT, "Source")
+    assert len(retry) == 1
+    _, sent = with_discord(lambda p: 200, lambda: watch.send(retry, state, NOW))
+    assert len(sent) == 1 and len(state["seen"]) == 2
+    assert watch.match_news([article()], set(state["seen"]), CUT, "Source") == []
+
+
+def test_discord_confirmation_preserves_webhook_query():
+    import io
+    from unittest.mock import patch
+    from urllib.parse import urlsplit, parse_qsl
+
+    requests = []
+    def urlopen(req, timeout=None):
+        requests.append(req.full_url)
+        return io.BytesIO(b'{"id":"123456789"}')
+    for hook in ("https://discord.invalid/x", "https://discord.invalid/x?thread_id=42&wait=false&wait=true&foo="):
+        with patch.object(watch, "HOOK", hook), patch.object(watch.urllib.request, "urlopen", urlopen):
+            watch.post({"content": "test"})
+        query = parse_qsl(urlsplit(requests[-1]).query, keep_blank_values=True)
+        assert [v for k, v in query if k == "wait"] == ["true"]
+        if "thread_id" in hook:
+            assert ("thread_id", "42") in query and ("foo", "") in query
+
+
+def test_discord_unconfirmed_messages_are_not_seen():
+    import io, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    for body in (b"", b"{}", b"null", b"[]", b"not JSON", b'{"id":""}'):
+        responses = []
+        def urlopen(req, timeout=None):
+            response = io.BytesIO(body)
+            responses.append(response)
+            return response
+        state = {"seen": {}}
+        with tempfile.TemporaryDirectory() as folder, patch.object(watch, "STATE", Path(folder) / "state.json"), \
+                patch.object(watch, "HOOK", "https://discord.invalid/x"), \
+                patch.object(watch.urllib.request, "urlopen", urlopen), patch.object(watch.time, "sleep", lambda _: None):
+            try:
+                watch.send([(["news:pending"], {"title": "Malware report"})], state, NOW)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"unconfirmed response accepted: {body!r}")
+        assert state["seen"] == {} and len(responses) == 5
+        assert all(r.closed for r in responses)
+
+
 def test_fit():
     e = {"title": "t", "fields": [{"name": "p", "value": "x" * 1024} for _ in range(7)] + [{"name": "ลิงก์", "value": "l"}]}
     watch.fit(e)
@@ -343,6 +429,279 @@ def test_fetch_gzip():
         assert watch.fetch("https://x.example")[0] == {"ok": 1}
     finally:
         watch.urllib.request.urlopen = saved
+
+
+def article(title="Trojanized Claude Code Extension Plants an SSH Backdoor", **changes):
+    return {"title": title, "url": "https://example.com/claude-backdoor", "published": NOW - timedelta(hours=1),
+            "description": "A malicious Open VSX extension installs persistent SSH access.", "categories": [], **changes}
+
+
+def test_news_without_cve_and_url_deduplication():
+    taken = set()
+    out = watch.match_news([article(url="https://example.com/claude-backdoor/?utm_source=rss#details")], taken, CUT, "Researcher")
+    assert len(out) == 1
+    keys, card = out[0]
+    assert keys == ["news:https://example.com/claude-backdoor"]
+    assert card["url"] == "https://example.com/claude-backdoor" and "SSH Backdoor" in card["title"]
+    assert card["author"]["name"].endswith("Researcher") and "Open VSX" in card["description"]
+    assert not any(k.startswith("cve:") for k in taken)
+    assert watch.match_news([article()], taken, CUT, "Other source") == []
+    different = watch.match_news([article(url="https://example.com/?p=12"), article(url="https://example.com/?p=13")], taken, CUT, "Researcher")
+    assert len(different) == 2  # identity-bearing query parameters are not tracking
+    leaks = watch.match_news([article("AI API keys exposed in public repositories", description="Review your keys.", url="https://x.example/keys"),
+                             article("Developer secrets leaked", description="Rotate affected secrets.", url="https://x.example/secrets")], set(), CUT, "Source")
+    assert len(leaks) == 2  # credential incidents need no particular product name or CVE
+
+
+def test_news_filters_and_untrusted_fields():
+    records = [article(), article("New AI model launched", description="Faster coding assistant", url="https://x.example/launch"),
+               article("Sponsored: prevent malware", url="https://x.example/ad"),
+               article("[Sponsored] Prevent token theft", url="https://x.example/bracket-ad"),
+               article("Stop token theft", url="https://x.example/ad2", categories=["Sponsored"]),
+               article("Malware webinar", url="https://x.example/webinar", categories=["Webinars"]),
+               article(url="https://x.example/old", published=NOW-timedelta(days=3)),
+               article(url="javascript:alert(1)"), article(url=""), article(url="https://user:pass@example.com/x"),
+               article(title="", url="https://x.example/empty")]
+    out = watch.match_news(records, set(), CUT, "Source")
+    assert len(out) == 1, out
+    html = ET.fromstring('''<rss><channel><item><title>Backdoor [click](https://evil.example) @everyone</title>
+      <link>https://example.com/report</link><pubDate>Sun, 25 Oct 2026 11:00:00 GMT</pubDate>
+      <description><![CDATA[<p>Stolen <b>tokens</b> &amp; keys</p><script>fake()</script>]]></description>
+    </item></channel></rss>''')
+    card = watch.match_news(watch.parse_news(html), set(), CUT, "Source")[0][1]
+    assert r"\[click\]" in card["title"] and "<p>" not in card["description"]
+    assert "tokens & keys" in card["description"] and "fake()" not in card["description"]
+    card = watch.match_news([article(url="https://example.com/backdoor_(test)")], set(), CUT, "Source")[0][1]
+    assert "(" not in card["url"] and ")" not in card["url"]
+
+
+def test_parse_news_rss_and_atom():
+    rss = ET.fromstring('''<rss version="2.0"><channel>
+      <item><title>Claude Code backdoor</title><link>https://example.com/report</link>
+      <pubDate>Sat, 25 Oct 2026 10:00:00 GMT</pubDate><description>&lt;p&gt;Stolen &lt;b&gt;keys&lt;/b&gt;&lt;/p&gt;</description>
+      <category>Malware</category></item>
+      <item><title>Malformed</title><pubDate>invalid</pubDate></item>
+      <item><title>No date</title><link>https://example.com/no-date</link></item>
+    </channel></rss>''')
+    articles = watch.parse_news(rss)
+    assert len(articles) == 1 and articles[0]["categories"] == ["Malware"]
+    assert articles[0]["published"] == datetime(2026, 10, 25, 10, tzinfo=UTC)
+    card = watch.match_news(articles, set(), CUT, "RSS")[0][1]
+    assert card["description"] == "Stolen keys"
+    atom = ET.fromstring('''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+      <title>Cloud token theft</title><link rel="self" href="https://example.com/entry.xml"/>
+      <link rel="alternate" href="https://example.com/report"/><published>2026-10-25T12:00:00Z</published>
+      <updated>2026-10-26T12:00:00Z</updated><summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Stolen <b>cloud tokens</b></p></div></summary>
+      <category term="Cloud"/></entry></feed>''')
+    articles = watch.parse_news(atom)
+    assert articles[0]["url"] == "https://example.com/report"
+    assert articles[0]["published"] == NOW and articles[0]["categories"] == ["Cloud"]
+    assert watch.match_news(articles, set(), CUT, "Atom")[0][1]["description"] == "Stolen cloud tokens"
+    try:
+        watch.parse_news(ET.fromstring("<html><body>blocked</body></html>"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("HTML challenge pages must surface as source failures")
+
+
+def test_fetch_xml_gzip():
+    import gzip, io
+
+    class Response(io.BytesIO):
+        headers = {"Content-Encoding": "gzip"}
+    saved = watch.urllib.request.urlopen
+    watch.urllib.request.urlopen = lambda req, timeout=None: Response(gzip.compress(b'<rss><channel/></rss>'))
+    try:
+        root, _ = watch.fetch("https://x.example/rss", decode=ET.fromstring)
+        assert root.tag == "rss"
+        assert watch.get_news("https://x.example/rss") == []
+    finally:
+        watch.urllib.request.urlopen = saved
+
+
+def test_news_preserves_literal_markup_from_publishers():
+    rss = '''<rss><channel><item><title>Browser extension security report &lt;script&gt;</title>
+      <link>https://example.com/report</link><pubDate>Sun, 25 Oct 2026 11:00:00 GMT</pubDate>
+      <description><![CDATA[<p>The extension injects &lt;script&gt; to steal credentials.</p>]]></description>
+    </item></channel></rss>'''
+    atom = '''<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Browser extension security report &lt;script&gt;</title>
+      <link href="https://example.com/report"/><published>2026-10-25T11:00:00Z</published>
+      <summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>The extension injects &lt;script&gt; to steal credentials.</p></div></summary>
+    </entry></feed>'''
+    atom_text = atom.replace('<summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>', '<summary>').replace('</p></div></summary>', '</summary>')
+    for xml in (rss, atom, atom_text):
+        card = watch.match_news(watch.parse_news(ET.fromstring(xml)), set(), CUT, "Source")[0][1]
+        assert card["description"] == r"The extension injects \<script\> to steal credentials."
+        assert card["title"] == r"Browser extension security report \<script\>"
+
+
+def test_news_main_delivery_health_startup_and_preview():
+    import contextlib, io, json, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    class Response(io.BytesIO):
+        headers = {}
+
+    sent, failing = [], [True]
+    source_names = list(watch.NEWS_FEEDS)
+    feeds = {url: f'''<rss><channel><item><title>Claude Code backdoor {i}</title>
+      <link>https://example.com/report-{i}</link><pubDate>Sun, 25 Oct 2026 11:00:00 GMT</pubDate>
+      <description>Malicious extension steals tokens.</description></item></channel></rss>'''.encode()
+             for i, url in enumerate(watch.NEWS_FEEDS.values())}
+
+    def urlopen(req, timeout=None):
+        if req.data is not None:
+            assert req.full_url == "https://discord.invalid/test?wait=true"
+            sent.append(json.loads(req.data))
+            return Response(b'{"id":"123456789"}')
+        url = req.full_url
+        if url == watch.NEWS_FEEDS[source_names[1]] and failing[0]:
+            raise OSError("test news source down")
+        if url in feeds:
+            return Response(feeds[url])
+        if url == watch.KEV_URL:
+            data = {"vulnerabilities": [kev("CVE-2026-42")]}
+        elif url.startswith(watch.GHSA_URL):
+            data = []
+        elif "cveId=" in url:
+            data = {"vulnerabilities": [{"cve": nvd("CVE-2026-42")}]}
+        elif url.startswith(watch.NVD_URL):
+            data = {"vulnerabilities": [], "totalResults": 0}
+        else:
+            raise AssertionError(f"unexpected request: {url}")
+        return Response(json.dumps(data).encode())
+
+    with tempfile.TemporaryDirectory() as folder, contextlib.ExitStack() as stack:
+        state_file = Path(folder) / "state.json"
+        state_file.write_text(json.dumps({"digest": NOW.date().isoformat(), "fail": {},
+                                         "seen": {"kev:CVE-2026-42": NOW.isoformat()}}))
+        stack.enter_context(patch.multiple(watch, STATE=state_file, HOOK="https://discord.invalid/test", datetime=Clock))
+        stack.enter_context(patch.object(watch.urllib.request, "urlopen", urlopen))
+        stack.enter_context(patch.object(watch.time, "sleep", lambda _: None))
+        stack.enter_context(patch.dict(watch.os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        watch.main()
+        state = json.loads(state_file.read_text())
+        assert len(state["seen"]) == 4 and state["fail"] == {source_names[1]: 1}
+        assert len(sent) == 1 and len(sent[0]["embeds"]) == 3  # healthy sources still deliver
+        assert sent[0]["allowed_mentions"] == {"parse": []}
+        watch.main()
+        assert len(sent) == 1  # delivered articles are not repeated
+        for _ in range(4):
+            watch.main()
+        assert len(sent) == 2 and source_names[1] in sent[-1]["embeds"][0]["title"]
+        failing[0] = False
+        watch.main()
+        state = json.loads(state_file.read_text())
+        assert state["fail"] == {} and len(state["seen"]) == 5
+        counts = {f["name"]: f["value"] for f in watch.digest({**state, "digest": "2026-10-24"}, NOW)[0]["fields"]}
+        assert counts[watch.SECURITY_NEWS] == "**4**"
+        before = state_file.read_bytes()
+        sent.clear()
+        watch.preview(NOW)
+        assert state_file.read_bytes() == before
+        news_cards = [e for p in sent for e in p["embeds"] if e.get("author", {}).get("name", "").startswith(watch.SECURITY_NEWS)]
+        assert len(news_cards) == 4 and all(p["allowed_mentions"] == {"parse": []} for p in sent)
+        state_file.unlink()
+        sent.clear()
+        watch.main()
+        assert len(sent) == 1 and len(sent[0]["embeds"]) == 1  # first install quietly seeds all feeds
+        assert watch.SECURITY_NEWS in sent[0]["embeds"][0]["description"]
+        assert len(json.loads(state_file.read_text())["seen"]) == 5  # KEV uses its own key + four reports
+
+
+def test_kev_is_confirmed_and_saved_before_other_sources():
+    import contextlib, io, json, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    sent, snapshots = [], []
+    with tempfile.TemporaryDirectory() as folder, contextlib.ExitStack() as stack:
+        state_file = Path(folder) / "state.json"
+        state_file.write_text(json.dumps({"seen": {}, "fail": {}, "digest": NOW.date().isoformat()}))
+        def later_source(*args):
+            snapshots.append(json.loads(state_file.read_text())["seen"])
+            return []
+        def urlopen(req, timeout=None):
+            assert req.full_url == "https://discord.invalid/test?wait=true"
+            sent.append(json.loads(req.data))
+            return io.BytesIO(b'{"id":"123456789"}')
+        stack.enter_context(patch.multiple(watch, STATE=state_file, HOOK="https://discord.invalid/test", datetime=Clock,
+                                          get_kev=lambda: [kev("CVE-2026-42")], nvd_lookup=lambda: lambda _: None,
+                                          get_ghsa=later_source, get_nvd=later_source, get_news=later_source))
+        stack.enter_context(patch.object(watch.urllib.request, "urlopen", urlopen))
+        stack.enter_context(patch.dict(watch.os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        watch.main()
+        assert len(sent) == 1 and sent[0]["content"] == "@here"
+        assert len(snapshots) == 6 and all("kev:CVE-2026-42" in s for s in snapshots)
+        watch.main()
+        assert len(sent) == 1  # the next run never repeats the acknowledged urgent alert
+        state_file.write_text(json.dumps({"seen": {}, "fail": {}, "digest": NOW.date().isoformat()}))
+        before = state_file.read_bytes()
+        dry_output = io.StringIO()
+        with patch.object(watch, "HOOK", None), contextlib.redirect_stdout(dry_output):
+            watch.main()
+        assert state_file.read_bytes() == before and len(sent) == 1
+        assert "CVE-2026-42" in dry_output.getvalue()  # dry runs print urgent alerts without saving
+
+
+def test_kev_failure_boundaries_preserve_state():
+    import contextlib, io, json, tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    for failure in ("later_source", "discord"):
+        calls = []
+        def ghsa_failure(*args):
+            calls.append("GHSA")
+            raise OSError("source down")
+        def interrupt(*args):
+            raise KeyboardInterrupt("simulate job cancellation")
+        def urlopen(req, timeout=None):
+            if failure == "discord":
+                raise OSError("Discord down")
+            return io.BytesIO(b'{"id":"123456789"}')
+        with tempfile.TemporaryDirectory() as folder, contextlib.ExitStack() as stack:
+            state_file = Path(folder) / "state.json"
+            state_file.write_text(json.dumps({"seen": {}, "fail": {}, "digest": NOW.date().isoformat()}))
+            stack.enter_context(patch.multiple(watch, STATE=state_file, HOOK="https://discord.invalid/test", datetime=Clock,
+                                              get_kev=lambda: [kev("CVE-2026-42")], nvd_lookup=lambda: lambda _: None,
+                                              get_ghsa=ghsa_failure, get_nvd=interrupt))
+            stack.enter_context(patch.object(watch.urllib.request, "urlopen", urlopen))
+            stack.enter_context(patch.object(watch.time, "sleep", lambda _: None))
+            stack.enter_context(patch.dict(watch.os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch"}))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            try:
+                watch.main()
+            except (KeyboardInterrupt, RuntimeError) as error:
+                assert isinstance(error, KeyboardInterrupt if failure == "later_source" else RuntimeError)
+            else:
+                raise AssertionError("expected job failure")
+            state = json.loads(state_file.read_text())
+            if failure == "later_source":
+                assert "kev:CVE-2026-42" in state["seen"] and state["fail"] == {"GitHub Advisory": 1}
+            else:
+                assert state["seen"] == {} and state["fail"] == {} and calls == []
 
 
 def test_ghsa_many_packages():
