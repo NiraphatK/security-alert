@@ -37,7 +37,7 @@ Cloudflare Worker (trigger/, every 5 minutes)
 
 The [watch workflow](.github/workflows/watch.yml) also has a GitHub Actions schedule as a fallback. Scheduled runs can be delayed, so the five-minute interval is a target, not a delivery guarantee.
 
-The workflow commits `state.json` back to `main` to track delivered alerts across runs. On a first run without state, the watcher records existing matches and sends a startup notice instead of posting the backlog.
+The workflow commits `state.json` back to `main` to track delivered alerts across runs. A failed push is retried up to three attempts, waiting five then ten seconds and pulling/rebasing before each attempt. This retries state persistence without sending alerts again; pull/rebase failures or three failed pushes still fail the run. On a first run without state, the watcher records existing matches and sends a startup notice instead of posting the backlog.
 
 When enabling news feeds on an existing installation, the first run includes matching articles published in the past 24 hours. Subsequent runs send unseen articles in that window. A long outage can miss news that has aged out of that window or disappeared from a publisher's feed.
 
