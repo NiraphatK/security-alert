@@ -43,7 +43,13 @@ jobs:
           git add state.json
           git diff --cached --quiet && exit 0
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "state: $(date -u +%FT%TZ)"
-          git pull -q --rebase && git push -q
+          # Retry saving delivery history, without running the watcher and sending its alerts again.
+          for attempt in 1 2 3; do
+            git pull -q --rebase
+            if git push -q; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then sleep "$((attempt * 5))"; fi
+          done
+          exit 1
 
       # Runs every 5 minutes, so announce only the change: the first failed run and the first good one after
       # shortcut: inspect 100 completed runs; use saved health state if cancellations can fill that window.
@@ -59,7 +65,7 @@ jobs:
           curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
             "allowed_mentions": {"parse": []},
             "embeds": [{"title": "ตัวเฝ้าข่าวช่องโหว่ทำงานล้มเหลว", "url": "'"$RUN"'", "color": 16762173,
-                        "description": "รอบนี้ไม่ได้ส่งข่าว\nกดหัวข้อเพื่อดู log บน GitHub Actions\nจะแจ้งอีกครั้งเมื่อกลับมาทำงานปกติ"}]}'
+                        "description": "รอบนี้ทำงานไม่ครบ อาจส่งข่าวสำเร็จไปแล้วบางส่วน\nกดหัวข้อเพื่อดู log บน GitHub Actions\nจะแจ้งอีกครั้งเมื่อกลับมาทำงานปกติ"}]}'
 
       - name: Tell Discord the watcher recovered
         if: success()
