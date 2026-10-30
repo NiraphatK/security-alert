@@ -46,6 +46,7 @@ jobs:
           git pull -q --rebase && git push -q
 
       # Runs every 5 minutes, so announce only the change: the first failed run and the first good one after
+      # shortcut: inspect 100 completed runs; use saved health state if cancellations can fill that window.
       - name: Tell Discord the watcher broke
         if: failure()
         env:
@@ -53,7 +54,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          prev=$(gh run list -w watch.yml -s completed -L 1 --json conclusion -q '.[0].conclusion' || true)
+          prev=$(gh run list -w watch.yml -s completed -L 100 --json conclusion -q 'map(select(.conclusion == "success" or .conclusion == "failure"))[0].conclusion // ""' || true)
           [ "$prev" = failure ] && exit 0
           curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
             "allowed_mentions": {"parse": []},
@@ -66,7 +67,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          prev=$(gh run list -w watch.yml -s completed -L 1 --json conclusion -q '.[0].conclusion' || true)
+          prev=$(gh run list -w watch.yml -s completed -L 100 --json conclusion -q 'map(select(.conclusion == "success" or .conclusion == "failure"))[0].conclusion // ""' || true)
           [ "$prev" = failure ] || exit 0
           curl -fsS -H "Content-Type: application/json" -A "DiscordBot (security-alert, 1)" "$DISCORD_WEBHOOK" -d '{
             "allowed_mentions": {"parse": []},

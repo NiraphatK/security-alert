@@ -1,11 +1,9 @@
-import { env } from "cloudflare:workers";
-
 // GitHub fires the watch workflow's own */5 cron only every few hours, so this Worker's cron asks
 // GitHub to run it every 5 minutes. GITHUB_TOKEN: fine-grained token, this repo only, Actions read/write.
 const DISPATCH = "https://api.github.com/repos/NiraphatK/security-alert/actions/workflows/watch.yml/dispatches";
 
 export default {
-	async scheduled() {
+	async scheduled(_controller, env) {
 		const res = await fetch(DISPATCH, {
 			method: "POST",
 			headers: {
@@ -18,4 +16,4 @@ export default {
 		// throwing marks this cron run as failed in the Cloudflare dashboard
 		if (!res.ok) throw new Error(`GitHub workflow dispatch failed: ${res.status} ${await res.text()}`);
 	},
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<Env>;
