@@ -1,6 +1,8 @@
 {
  "digest": "2026-11-13",
- "fail": {},
+ "fail": {
+  "NVD": 1
+ },
  "seen": {
   "cve:CVE-2025-11969": "2026-11-02T06:20:17+00:00",
   "cve:CVE-2025-30046": "2026-10-24T08:30:12+00:00",
@@ -1242,6 +1244,7 @@
   "news:https://www.securityweek.com/rigged-coding-assignment-abused-ai-tool-opened-path-to-6-billion-binance-heist": "2026-11-04T10:50:39+00:00",
   "news:https://www.securityweek.com/russia-linked-hackers-hit-ios-android-devices-with-exploit-chains-via-watering-holes": "2026-11-05T10:40:17+00:00",
   "news:https://www.securityweek.com/sap-patches-critical-icm2shell-proxygate-vulnerabilities": "2026-11-10T14:50:17+00:00",
+  "news:https://www.securityweek.com/silentair-hackers-intercept-calls-sms-from-inside-mobile-networks": "2026-11-13T12:25:18+00:00",
   "news:https://www.securityweek.com/software-transparency-is-changing-allan-friedman-on-sbom-ai-boms-and-what-comes-next": "2026-11-10T16:50:18+00:00",
   "news:https://www.securityweek.com/sonicwall-patches-exploited-sonicos-bug-that-weakens-vpn-logins": "2026-11-07T10:25:17+00:00",
   "news:https://www.securityweek.com/syrian-hacker-gets-prison-time-in-us-after-over-a-decade-on-the-run": "2026-10-31T11:05:17+00:00",
