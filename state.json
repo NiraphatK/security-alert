@@ -1,6 +1,8 @@
 {
  "digest": "2026-11-13",
- "fail": {},
+ "fail": {
+  "NVD": 1
+ },
  "seen": {
   "cve:CVE-2025-11969": "2026-11-02T06:20:17+00:00",
   "cve:CVE-2025-30046": "2026-10-24T08:30:12+00:00",
@@ -1212,6 +1214,7 @@
   "news:https://www.securityweek.com/italys-meloni-blames-pro-russian-hackers-for-leak-of-foreign-ministers-data-on-the-dark-web": "2026-11-09T12:25:19+00:00",
   "news:https://www.securityweek.com/ivanti-patches-two-more-zero-days-exploited-in-connect-secure-attack-chain": "2026-11-02T08:00:29+00:00",
   "news:https://www.securityweek.com/japan-announces-emergency-cybersecurity-package-following-a-wave-of-attacks": "2026-11-06T18:35:18+00:00",
+  "news:https://www.securityweek.com/law-enforcement-disrupts-gootloader-castlerat-and-stealc-infrastructure": "2026-11-13T11:00:23+00:00",
   "news:https://www.securityweek.com/maersk-confirms-data-theft-amid-5-million-extortion-attempt": "2026-11-12T08:45:17+00:00",
   "news:https://www.securityweek.com/malicious-claude-code-extension-served-in-cursor-supply-chain-attack": "2026-11-02T11:30:23+00:00",
   "news:https://www.securityweek.com/malicious-cpguard-updates-served-in-opsshield-supply-chain-attack": "2026-11-04T10:55:18+00:00",
