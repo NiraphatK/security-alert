@@ -1,8 +1,6 @@
 {
  "digest": "2026-11-16",
- "fail": {
-  "NVD": 2
- },
+ "fail": {},
  "seen": {
   "cve:CVE-2025-11969": "2026-11-02T06:20:17+00:00",
   "cve:CVE-2025-30046": "2026-10-24T08:30:12+00:00",
@@ -1284,6 +1282,7 @@
   "news:https://www.securityweek.com/malicious-cpguard-updates-served-in-opsshield-supply-chain-attack": "2026-11-04T10:55:18+00:00",
   "news:https://www.securityweek.com/max-severity-gitlab-vulnerability-exploited-against-alpine-linux": "2026-10-30T11:39:51+00:00",
   "news:https://www.securityweek.com/meta-shares-top-muse-bug-bounty-findings-as-payouts-reach-1-2-million": "2026-11-04T08:35:18+00:00",
+  "news:https://www.securityweek.com/microsoft-rules-out-cyberattack-in-outage-warns-of-phishing-campaign": "2026-11-16T08:20:18+00:00",
   "news:https://www.securityweek.com/n-able-takes-n-central-offline-as-researcher-drops-over-30-zero-days": "2026-11-10T10:00:18+00:00",
   "news:https://www.securityweek.com/nightmare-eclipse-drops-windows-zero-day-exploit-signdrop": "2026-11-13T08:50:18+00:00",
   "news:https://www.securityweek.com/no-signs-of-hacking-in-faa-ground-stop-as-fbi-reportedly-probes-software-update": "2026-11-14T08:45:17+00:00",
