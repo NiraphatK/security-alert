@@ -1,6 +1,8 @@
 {
  "digest": "2026-11-16",
- "fail": {},
+ "fail": {
+  "NVD": 1
+ },
  "seen": {
   "cve:CVE-2025-11969": "2026-11-02T06:20:17+00:00",
   "cve:CVE-2025-30046": "2026-10-24T08:30:12+00:00",
@@ -1303,6 +1305,7 @@
   "news:https://www.securityweek.com/php2shell-exploited-in-destructive-check-point-gateway-attacks": "2026-11-13T07:40:25+00:00",
   "news:https://www.securityweek.com/plex2shell-exploited-against-qnap-nas-users": "2026-11-09T13:15:18+00:00",
   "news:https://www.securityweek.com/polymarket-returns-3-9-million-to-traders-as-debugbear-cites-dns-hijack": "2026-11-02T09:35:17+00:00",
+  "news:https://www.securityweek.com/recent-unrealircd-vulnerability-exploited-in-attacks": "2026-11-16T11:25:18+00:00",
   "news:https://www.securityweek.com/recently-patched-barracuda-vulnerabilities-exploited-in-attacks": "2026-11-11T07:55:17+00:00",
   "news:https://www.securityweek.com/revolve-data-breach-impacts-at-least-180000-people": "2026-11-02T13:40:19+00:00",
   "news:https://www.securityweek.com/revolve-puts-data-breach-victim-count-at-1-5-million": "2026-11-09T14:15:18+00:00",
