@@ -1,8 +1,6 @@
 {
  "digest": "2026-11-16",
- "fail": {
-  "NVD": 1
- },
+ "fail": {},
  "seen": {
   "cve:CVE-2025-11969": "2026-11-02T06:20:17+00:00",
   "cve:CVE-2025-30046": "2026-10-24T08:30:12+00:00",
@@ -1001,6 +999,7 @@
   "news:https://thehackernews.com/2026/11/186-fake-ai-domains-redirect-users-to.html": "2026-11-12T16:10:20+00:00",
   "news:https://thehackernews.com/2026/11/4837-hijacked-github-accounts-ran-ci.html": "2026-11-12T07:30:20+00:00",
   "news:https://thehackernews.com/2026/11/5-active-cyber-threats-that-put-us.html": "2026-11-05T10:50:18+00:00",
+  "news:https://thehackernews.com/2026/11/amazon-uncovers-ai-agent-campaign.html": "2026-11-16T07:50:17+00:00",
   "news:https://thehackernews.com/2026/11/antifox-ai-pentesting-platform-linked.html": "2026-11-11T16:15:19+00:00",
   "news:https://thehackernews.com/2026/11/apple-patches-imessage-group-chat.html": "2026-11-10T11:00:18+00:00",
   "news:https://thehackernews.com/2026/11/apt29-linked-hackers-hijack-web.html": "2026-11-04T14:45:21+00:00",
@@ -1015,6 +1014,7 @@
   "news:https://thehackernews.com/2026/11/binance-warns-of-ios-sandbox-escape.html": "2026-11-10T12:45:17+00:00",
   "news:https://thehackernews.com/2026/11/bitter-hackers-deploy-new-paprat.html": "2026-11-09T15:25:18+00:00",
   "news:https://thehackernews.com/2026/11/blind-eagle-uses-fake-court-notices-to.html": "2026-11-10T16:15:17+00:00",
+  "news:https://thehackernews.com/2026/11/bo-team-exploits-log4shell-in-vmware.html": "2026-11-16T07:50:17+00:00",
   "news:https://thehackernews.com/2026/11/calendar-invites-and-live-proxies.html": "2026-11-12T12:35:17+00:00",
   "news:https://thehackernews.com/2026/11/chainalysis-breach-exposes-all-users.html": "2026-11-06T08:35:18+00:00",
   "news:https://thehackernews.com/2026/11/chainstack-reports-production-systems.html": "2026-11-03T18:55:34+00:00",
